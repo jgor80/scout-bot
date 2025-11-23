@@ -3,24 +3,20 @@ const {
   GatewayIntentBits,
   Events,
   EmbedBuilder,
-  ApplicationCommandOptionType,
   ActionRowBuilder,
-  StringSelectMenuBuilder
+  StringSelectMenuBuilder,
+  ApplicationCommandOptionType
 } = require('discord.js');
 
+const axios = require('axios');
 const OpenAI = require('openai');
 
 // EA Pro Clubs API wrapper
-const clubApi = require('proclubs-api/dist/core/club');
 const {
-  getClubSearch,
   getClubInfo,
   getClubStats,
   getClubMatchHistory
-} = clubApi;
-
-// If getClubSearch is missing in the installed version, this will be undefined
-const HAS_SEARCH = typeof getClubSearch === 'function';
+} = require('proclubs-api/dist/core/club');
 
 // -------------------- ENV VARS --------------------
 
@@ -32,12 +28,23 @@ if (!token) {
 
 const openaiApiKey = process.env.OPENAI_API_KEY;
 if (!openaiApiKey) {
-  console.warn('⚠️ OPENAI_API_KEY not set – /scoutclub will not work.');
+  console.warn('⚠️ OPENAI_API_KEY not set – scouting reports will fail.');
 }
 const openai = new OpenAI({ apiKey: openaiApiKey });
 
-// Platforms we’ll search across
-const PLATFORMS = ['xboxone', 'xbox-series-xs', 'ps5', 'ps4', 'pc'];
+// -------------------- CONSTANTS --------------------
+
+const PLATFORMS = ['xboxone', 'ps5', 'ps4', 'pc'];
+const PLATFORM_LABELS = {
+  xboxone: 'Xbox (One / Series)',
+  ps5: 'PlayStation 5',
+  ps4: 'PlayStation 4',
+  pc: 'PC'
+};
+
+// Store pending choices per user for the select menu
+// Map<userId, { query: string, results: Array<{ platform, clubId, name, region, division }> }>
+const pendingScoutChoices = new Map();
 
 // -------------------- DISCORD CLIENT --------------------
 
@@ -45,83 +52,69 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// -------------------- HELPERS --------------------
+// -------------------- EA SEARCH HELPERS --------------------
 
-// Simple fuzzy score: higher = better match
-function scoreNameMatch(query, name) {
-  const q = query.toLowerCase();
-  const n = name.toLowerCase();
+// Hit EA once per platform and collect all matching clubs
+async function searchClubsAcrossPlatforms(query) {
+  const results = [];
+  const q = query.trim();
+  if (!q) return results;
 
-  let score = 0;
-  if (n === q) score += 100;          // exact match
-  if (n.includes(q)) score += 50;     // substring
-  // small penalty for length difference
-  score -= Math.abs(n.length - q.length);
-  return score;
-}
+  await Promise.all(
+    PLATFORMS.map(async (platform) => {
+      try {
+        const res = await axios.get(
+          'https://proclubs.ea.com/api/fifa/clubs/search',
+          {
+            params: { clubName: q, platform },
+            timeout: 5000
+          }
+        );
 
-// Search all platforms once and return up to 5 best matches
-// => [{ platform, clubId, name }]
-async function searchClubsAllPlatforms(query) {
-  if (!HAS_SEARCH) {
-    console.warn('⚠️ getClubSearch is not available in proclubs-api. Fuzzy search disabled.');
-    return [];
-  }
-
-  const matchesMap = new Map(); // key: platform:clubId
-
-  for (const platform of PLATFORMS) {
-    try {
-      console.log(`🔎 getClubSearch("${query}") on ${platform}`);
-      const results = await getClubSearch(platform, query);
-      if (!Array.isArray(results)) continue;
-
-      for (const club of results) {
-        const clubId = String(club.clubId || club.clubid || club.id || '').trim();
-        const name = String(
-          club.name || club.clubName || club.clubname || ''
-        ).trim();
-
-        if (!clubId || !name) continue;
-
-        const key = `${platform}:${clubId}`;
-        const s = scoreNameMatch(query, name);
-
-        const existing = matchesMap.get(key);
-        if (!existing || s > existing.score) {
-          matchesMap.set(key, {
-            platform,
-            clubId,
-            name,
-            score: s
-          });
+        const clubs = res.data?.clubs || res.data?.result || [];
+        if (Array.isArray(clubs)) {
+          for (const club of clubs) {
+            if (!club) continue;
+            results.push({
+              platform,
+              clubId: String(club.clubId ?? club.club) || '',
+              name: club.name || club.clubName || q,
+              region: club.regionName || club.region || club.countryName || null,
+              division: club.division || club.leagueDivision || null
+            });
+          }
         }
+      } catch (err) {
+        console.error(
+          `⚠️ EA search error for platform=${platform}, query="${q}":`,
+          err.toString()
+        );
       }
-    } catch (err) {
-      console.error(
-        `⚠️ getClubSearch failed for platform=${platform}, query="${query}":`,
-        err.message || err
-      );
-    }
+    })
+  );
+
+  // Deduplicate by platform+clubId
+  const seen = new Set();
+  const unique = [];
+  for (const r of results) {
+    if (!r.clubId) continue;
+    const key = `${r.platform}:${r.clubId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
   }
 
-  const matches = Array.from(matchesMap.values());
-  if (!matches.length) return [];
-
-  matches.sort((a, b) => b.score - a.score);
-  return matches.slice(0, 5);
+  return unique;
 }
 
-// Build scouting report via OpenAI when we ALREADY know platform + clubId
-async function createScoutingReportFromKnownClub(platform, clubId, clubName) {
+// -------------------- OPENAI SCOUTING HELPERS --------------------
+
+async function createScoutingReportFromId(platform, clubId, displayName) {
   if (!openaiApiKey) {
     throw new Error('OPENAI_API_KEY is not set.');
   }
 
-  console.log(
-    `📊 Creating scouting report for ${clubName} (id=${clubId}) on ${platform}`
-  );
-
+  // 1) Fetch core club data + stats + recent matches
   const [info, stats, divMatches, cupMatches] = await Promise.all([
     getClubInfo(platform, clubId),
     getClubStats(platform, clubId),
@@ -130,7 +123,7 @@ async function createScoutingReportFromKnownClub(platform, clubId, clubName) {
   ]);
 
   const recentDiv = Array.isArray(divMatches) ? divMatches.slice(0, 20) : [];
-  const recentCup = Array.isArray(cupMatches) ? recentCup.slice(0, 10) : [];
+  const recentCup = Array.isArray(cupMatches) ? cupMatches.slice(0, 10) : [];
 
   const inputText =
     `You are an experienced EA FC Pro Clubs tactical analyst. ` +
@@ -141,9 +134,9 @@ async function createScoutingReportFromKnownClub(platform, clubId, clubName) {
     `- Key players and main threats (goals/assists, ratings, positions)\n` +
     `- Defensive tendencies & weaknesses (goals conceded patterns, clean sheets, discipline)\n` +
     `- Suggested game plan to beat them.\n\n` +
-    `Club name: ${clubName}\n` +
-    `Detected platform: ${platform}\n` +
-    `Club ID: ${clubId}\n\n` +
+    `Club display name: ${displayName}\n` +
+    `EA internal club ID: ${clubId}\n` +
+    `Platform: ${platform}\n\n` +
     `Club info JSON:\n${JSON.stringify(info)}\n\n` +
     `Club stats JSON:\n${JSON.stringify(stats)}\n\n` +
     `Recent division matches JSON (up to 20):\n${JSON.stringify(recentDiv)}\n\n` +
@@ -166,8 +159,7 @@ async function createScoutingReportFromKnownClub(platform, clubId, clubName) {
   });
 
   const report = response.output_text || 'No report text returned.';
-
-  return { platform, clubId, info, report };
+  return { info, report };
 }
 
 // -------------------- READY & COMMAND REGISTRATION --------------------
@@ -176,16 +168,16 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
   console.log(`✅ App ID: ${c.application.id}`);
 
+  // Only one command: /scoutclub (approximate club name, all platforms searched)
   await c.application.commands.set([
     {
       name: 'scoutclub',
       description:
-        'Search all platforms for an EA FC Pro Clubs team and get a stats-based report.',
+        'Look up an EA FC Pro Clubs team by name and generate a scouting report.',
       options: [
         {
           name: 'name',
-          description:
-            'Approximate club name (you’ll choose from the closest matches)',
+          description: 'Approximate club name as it appears in-game',
           type: ApplicationCommandOptionType.String,
           required: true
         }
@@ -200,87 +192,111 @@ client.once(Events.ClientReady, async (c) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // ---------- Slash command ----------
+    // Slash commands
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
 
+      // /scoutclub – search all platforms, then let user pick a club, then generate report
       if (cmd === 'scoutclub') {
-        const query = interaction.options.getString('name').trim();
-
-        if (!query) {
-          return interaction.reply({
-            content: 'Please enter a club name.',
-            ephemeral: true
-          });
-        }
+        const clubName = interaction.options.getString('name', true);
 
         await interaction.deferReply();
 
-        // 1) Search all platforms ONCE for closest matches
-        let matches = [];
-        try {
-          matches = await searchClubsAllPlatforms(query);
-        } catch (err) {
-          console.error('❌ Error searching clubs:', err);
-        }
+        const matches = await searchClubsAcrossPlatforms(clubName);
 
-        // If we have no fuzzy search capability or no matches, bail
-        if (!HAS_SEARCH || matches.length === 0) {
-          await interaction.editReply({
-            content:
-              'I could not find any clubs matching that name on EA servers. Try a different spelling or check the exact in-game name.'
-          });
+        if (!matches.length) {
+          await interaction.editReply(
+            'I could not find any clubs matching that name on EA servers. Try a different spelling or the full exact in-game name.'
+          );
           return;
         }
 
-        // If exactly one match, skip menu and go straight to report
+        // If only one result, go straight to the report
         if (matches.length === 1) {
-          const m = matches[0];
-          try {
-            const { platform, info, report } =
-              await createScoutingReportFromKnownClub(
-                m.platform,
-                m.clubId,
-                m.name
-              );
+          const chosen = matches[0];
+          const labelPlatform = PLATFORM_LABELS[chosen.platform] || chosen.platform;
 
-            const titleName = info?.name || m.name;
+          await interaction.editReply(
+            `Found one match: **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId}). Generating scouting report…`
+          );
+
+          try {
+            const { info, report } = await createScoutingReportFromId(
+              chosen.platform,
+              chosen.clubId,
+              chosen.name
+            );
+
+            const titleName = info?.name || chosen.name;
             const text = report || 'No report generated.';
             const trimmed =
               text.length > 4000 ? text.slice(0, 4000) + '…' : text;
 
             const embed = new EmbedBuilder()
               .setTitle(
-                `Scouting report: ${titleName} (${platform.toUpperCase()})`
+                `Scouting report: ${titleName} (${labelPlatform}, ID: ${chosen.clubId})`
               )
               .setDescription(trimmed);
 
-            await interaction.editReply({ embeds: [embed], content: null });
+            await interaction.editReply({ content: null, embeds: [embed] });
           } catch (err) {
-            console.error('❌ Error creating report for single match:', err);
-            await interaction.editReply({
-              content:
-                'Found one club, but could not generate the scouting report (API error).'
-            });
+            console.error('❌ Error creating scouting report from ID:', err);
+            await interaction.editReply(
+              'I found the club, but failed to generate a scouting report (EA or OpenAI error).'
+            );
           }
+
           return;
         }
 
-        // 2) Multiple matches → show up to 5 as a dropdown
-        const options = matches.map((m) => ({
-          label: `${m.name} (${m.platform})`,
-          value: `${m.platform}:${m.clubId}:${encodeURIComponent(m.name)}`
-        }));
+        // Multiple results: let user choose via dropdown (no autocomplete)
+        const top = matches.slice(0, 5);
+        pendingScoutChoices.set(interaction.user.id, {
+          query: clubName,
+          results: top
+        });
+
+        const options = top.map((club, index) => {
+          const labelPlatform = PLATFORM_LABELS[club.platform] || club.platform;
+          const labelRegion = club.region ? ` – ${club.region}` : '';
+          const labelDivision = club.division ? ` – Div ${club.division}` : '';
+
+          return {
+            label: `${club.name} (${labelPlatform})`,
+            description: `${labelPlatform}${labelRegion}${labelDivision}`.slice(
+              0,
+              100
+            ),
+            value: String(index)
+          };
+        });
 
         const select = new StringSelectMenuBuilder()
           .setCustomId('scoutclub_pick')
-          .setPlaceholder('Choose the correct club')
+          .setPlaceholder('Select the correct club')
           .addOptions(options);
 
         const row = new ActionRowBuilder().addComponents(select);
 
+        const lines = top.map((club, index) => {
+          const labelPlatform = PLATFORM_LABELS[club.platform] || club.platform;
+          const parts = [labelPlatform];
+          if (club.region) parts.push(club.region);
+          if (club.division) parts.push(`Div ${club.division}`);
+          const extra = parts.length ? ' – ' + parts.join(' / ') : '';
+          return `**${index + 1}.** ${club.name}${extra}`;
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle('Multiple clubs found')
+          .setDescription(
+            lines.join('\n') +
+              '\n\nUse the dropdown below to pick the club you want to scout.'
+          );
+
         await interaction.editReply({
-          content: `I found these clubs matching **"${query}"**. Pick the correct one to generate a scouting report:`,
+          content: null,
+          embeds: [embed],
           components: [row]
         });
 
@@ -288,54 +304,70 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
 
-    // ---------- Select menu: user picked which club to scout ----------
+    // Select menu: user picks which club to scout
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId === 'scoutclub_pick') {
-        const value = interaction.values[0];
-        const parts = value.split(':');
+        const userId = interaction.user.id;
+        const state = pendingScoutChoices.get(userId);
 
-        if (parts.length < 3) {
+        if (!state) {
           return interaction.reply({
-            content: 'Invalid selection payload.',
+            content:
+              'No pending club selection found. Please run `/scoutclub` again.',
             ephemeral: true
           });
         }
 
-        const platform = parts[0];
-        const clubId = parts[1];
-        const encodedName = parts.slice(2).join(':'); // in case name had ':'
-        const clubName = decodeURIComponent(encodedName);
+        const index = parseInt(interaction.values[0], 10);
+        const chosen = state.results[index];
+        if (!chosen) {
+          return interaction.reply({
+            content: 'Invalid club selection. Please run `/scoutclub` again.',
+            ephemeral: true
+          });
+        }
 
-        await interaction.deferUpdate(); // acknowledge the menu click
+        // Remove pending state so we don't reuse it accidentally
+        pendingScoutChoices.delete(userId);
+
+        const labelPlatform =
+          PLATFORM_LABELS[chosen.platform] || chosen.platform;
+
+        // Acknowledge quickly, then do the heavy work
+        await interaction.deferUpdate();
+
+        // Update the original message to show that we're working
+        await interaction.editReply({
+          content: `Generating scouting report for **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId})…`,
+          embeds: [],
+          components: []
+        });
 
         try {
-          const { info, report } = await createScoutingReportFromKnownClub(
-            platform,
-            clubId,
-            clubName
+          const { info, report } = await createScoutingReportFromId(
+            chosen.platform,
+            chosen.clubId,
+            chosen.name
           );
 
-          const titleName = info?.name || clubName;
+          const titleName = info?.name || chosen.name;
           const text = report || 'No report generated.';
           const trimmed =
             text.length > 4000 ? text.slice(0, 4000) + '…' : text;
 
           const embed = new EmbedBuilder()
             .setTitle(
-              `Scouting report: ${titleName} (${platform.toUpperCase()})`
+              `Scouting report: ${titleName} (${labelPlatform}, ID: ${chosen.clubId})`
             )
             .setDescription(trimmed);
 
-          await interaction.editReply({
-            content: null,
-            embeds: [embed],
-            components: []
-          });
+          await interaction.editReply({ content: null, embeds: [embed] });
         } catch (err) {
-          console.error('❌ Error creating report from selection:', err);
+          console.error('❌ Error creating scouting report (select):', err);
           await interaction.editReply({
             content:
-              'I found the club, but generating the scouting report failed (API error).',
+              'I found the club, but failed to generate a scouting report (EA or OpenAI error).',
+            embeds: [],
             components: []
           });
         }
