@@ -42,30 +42,38 @@ const client = new Client({
 
 // -------------------- HELPERS --------------------
 
-// Search club across ALL platforms by name.
-// Returns { platform, clubId } or null.
+// Try to find a club ID by name on ANY platform
+// Returns { platform, clubId } or null
 async function findClubOnAnyPlatform(clubName) {
   let foundPlatform = null;
   let foundClubId = null;
+  let lastError = null;
 
   for (const platform of PLATFORMS) {
     try {
+      console.log(`🔎 getClubIdByName: "${clubName}" on ${platform}`);
       const clubId = await getClubIdByName(platform, clubName);
       if (clubId) {
         foundPlatform = platform;
         foundClubId = clubId;
+        console.log(`✅ Found clubId=${clubId} on ${platform}`);
         break;
       }
     } catch (err) {
+      lastError = err;
       console.error(
-        `⚠️ getClubIdByName failed for platform=${platform}, club="${clubName}":`,
+        `⚠️ getClubIdByName failed for "${clubName}" on ${platform}:`,
         err.message || err
       );
-      // keep going, maybe it exists on another platform
+      // continue to next platform
     }
   }
 
-  if (!foundPlatform || !foundClubId) return null;
+  if (!foundPlatform || !foundClubId) {
+    console.error('Last EA error object:', lastError);
+    return null;
+  }
+
   return { platform: foundPlatform, clubId: foundClubId };
 }
 
@@ -158,7 +166,7 @@ client.once(Events.ClientReady, async (c) => {
     }
   ]);
 
-  console.log('✅ Commands registered: /scoutclub (with autocomplete on club name)');
+  console.log('✅ Commands registered: /scoutclub (with autocomplete)');
 });
 
 // -------------------- INTERACTION HANDLER --------------------
@@ -181,11 +189,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       for (const platform of PLATFORMS) {
         try {
+          console.log(
+            `🔎 getClubSearch for autocomplete: "${query}" on ${platform}`
+          );
           const results = await getClubSearch(platform, query);
           if (!Array.isArray(results)) continue;
 
           for (const club of results) {
-            // Try a few possible name fields
             const clubName =
               (club && (club.name || club.clubName || club.clubname)) || '';
             if (!clubName) continue;
@@ -195,8 +205,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             if (!suggestionsMap.has(label)) {
               suggestionsMap.set(label, {
                 name: label,
-                // Value is just the name; we’ll figure out platform later
-                value: clubName
+                value: clubName // value is the plain name; we’ll detect platform later
               });
               if (suggestionsMap.size >= 25) break;
             }
@@ -207,6 +216,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             err.message || err
           );
         }
+
         if (suggestionsMap.size >= 25) break;
       }
 
@@ -223,7 +233,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const cmd = interaction.commandName;
 
-    // /scoutclub – EA Pro Clubs scouting report
     if (cmd === 'scoutclub') {
       const clubName = interaction.options.getString('name');
 
