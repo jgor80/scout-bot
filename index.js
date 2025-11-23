@@ -3,7 +3,9 @@ const {
   GatewayIntentBits,
   Events,
   EmbedBuilder,
-  ApplicationCommandOptionType
+  ApplicationCommandOptionType,
+  ActionRowBuilder,
+  StringSelectMenuBuilder
 } = require('discord.js');
 
 const OpenAI = require('openai');
@@ -265,8 +267,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         // 2) Multiple matches → show up to 5 as a dropdown
-        const { StringSelectMenuBuilder, ActionRowBuilder } = require('discord.js');
-
         const options = matches.map((m) => ({
           label: `${m.name} (${m.platform})`,
           value: `${m.platform}:${m.clubId}:${encodeURIComponent(m.name)}`
