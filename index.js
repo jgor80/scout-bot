@@ -32,16 +32,23 @@ const openai = new OpenAI({ apiKey: openaiApiKey });
 /* -------------------- CONSTANTS -------------------- */
 
 // FC platforms to try when searching leaderboard
-const FC_PLATFORMS = ['common-gen5', 'common-gen4', 'ps5', 'ps4', 'xbox-series-xs', 'xboxone'];
+const FC_PLATFORMS = [
+  'common-gen5',
+  'common-gen4',
+  'ps5',
+  'ps4',
+  'xbox-series-xs',
+  'xboxone'
+];
 
 const PLATFORM_LABELS = {
   'common-gen5': 'Cross-gen (Gen5)',
   'common-gen4': 'Cross-gen (Gen4)',
-  'ps5': 'PlayStation 5',
-  'ps4': 'PlayStation 4',
+  ps5: 'PlayStation 5',
+  ps4: 'PlayStation 4',
   'xbox-series-xs': 'Xbox Series X|S',
-  'xboxone': 'Xbox One',
-  'pc': 'PC'
+  xboxone: 'Xbox One',
+  pc: 'PC'
 };
 
 // Headers to make EA think we’re a normal browser
@@ -98,11 +105,12 @@ You’ll see three logical chunks of JSON:
 3. **Match history JSON** – grouped into:
    - League matches (recent league performance)
    - Playoff matches (high-pressure matches)
-   - Friendly matches (useful for tendencies, but less important than league/playoffs)
+   - Friendly matches (often used for competitive scrims and tournaments; treat these as **highly relevant** for tactics and game plans when the sample is strong).
 
 When reasoning:
 - Use overall stats for **big-picture quality** and long-term strengths/weaknesses.
-- Use match history for **recent form** and **patterns** (e.g., always concede late, win big, high-scoring games, etc.) *only if the data clearly supports it*.
+- Use match history (league + playoff + friendly) for **recent form** and **patterns** (e.g., always concede late, win big, high-scoring games, etc.) *only if the data clearly supports it*.
+- If there is a **large or recent friendly sample**, treat friendly matches as a strong indicator of tournament-style behavior and give them extra weight in your tactical conclusions.
 - Use player stats to identify **key attackers**, **playmakers**, and **defensive anchors**. Only call someone a “key player” if their stats clearly stand out (more games, more goals/assists, higher ratings, etc.).
 
 If timestamps, seasons, or ordering fields are present:
@@ -126,11 +134,13 @@ Organize the report with headings like:
    - How often they score.
    - Whether they seem direct vs possession-based (if shot counts, pass counts, or relevant stats exist).
    - Preferred threats: through the middle vs wide, headers vs long shots, etc. (only if supported).
+   - Where helpful, explicitly distinguish what you see in **league** vs **friendly** games (e.g., more open high-scoring friendlies).
 
 3. **Defensive Tendencies**
    - Goals conceded, clean sheet rate.
    - Patterns: concede early/late, vulnerable to counters, weak defending crosses, etc. (only if supported).
    - Discipline if cards/fouls are present.
+   - Call out any differences you see between league and friendly/playoff matches (for example, more open or weaker defending in friendlies).
 
 4. **Key Players & Roles**
    - 3–6 standout players, with:
@@ -139,8 +149,9 @@ Organize the report with headings like:
    - Do not list every player. Focus on the clearest standouts.
 
 5. **Recent Form & Mentality**
-   - Use the most recent slice of league/playoff matches provided.
+   - Use the most recent slice of **league, playoff, and friendly** matches provided.
    - Win/loss tendencies, blowouts vs tight games, comebacks/choking if the data supports it.
+   - Explicitly mention if friendlies suggest a different mentality (for example, more experimental lineups vs serious tournament-style friendlies).
 
 6. **Game Plan to Beat Them**
    - Make this section **as specific and concrete as possible**, but only when the data clearly supports it.
@@ -148,6 +159,7 @@ Organize the report with headings like:
      - If they concede many goals from crosses or headers, suggest overloading wide areas and attacking the back post.
      - If they score many counterattack goals with a specific striker, suggest a deeper line or dedicated cover.
      - If they struggle in close games or concede late, suggest sustained pressure late in each half.
+     - If friendlies show different behavior than league (e.g. more aggressive press, different formation), highlight this and explain how to exploit it in **tournament-style matches**.
    - Avoid generic advice like “play your game” or “just focus”; every point should be clearly linked to a real tendency in the data.
 
 7. **Uncertainties & Data Gaps (if needed)**
@@ -190,6 +202,7 @@ Instructions:
 
 - Treat these blobs as your only source of truth.
 - Only talk about players, stats, and patterns that you can reasonably derive from these JSON structures.
+- Give **particular attention** to patterns that appear in friendly matches, because those are often used as tournament-style games. If friendlies provide a larger or more recent sample, you should lean on them heavily for inferring tactics and mentality.
 - If any of the JSON is clearly partial or truncated, treat that section as partial data.
 - If something important (like positions, cards, or timestamps) is missing, acknowledge that briefly instead of guessing.
 
@@ -524,208 +537,4 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const titleName = info?.name || chosen.name;
             const text = report || 'No report generated.';
             const trimmed =
-              text.length > 4000 ? text.slice(0, 4000) + '…' : text;
-
-            const embed = new EmbedBuilder()
-              .setTitle(
-                `Scouting report: ${titleName} (${labelPlatform}, ID: ${chosen.clubId})`
-              )
-              .setDescription(trimmed);
-
-            await interaction.editReply({ content: null, embeds: [embed] });
-          } catch (err) {
-            console.error('❌ Error creating scouting report from ID:', err);
-            if (
-              err.code === 'insufficient_quota' ||
-              err.error?.code === 'insufficient_quota'
-            ) {
-              await interaction.editReply(
-                'I found the club, but the OpenAI API quota has been exceeded. Please check your billing or try again later.'
-              );
-            } else if (
-              err.code === 'context_length_exceeded' ||
-              err.error?.code === 'context_length_exceeded'
-            ) {
-              await interaction.editReply(
-                'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.'
-              );
-            } else {
-              await interaction.editReply(
-                'I found the club, but failed to generate a scouting report (EA or OpenAI error).'
-              );
-            }
-          }
-
-          return;
-        }
-
-        // Multiple results: let user choose via dropdown
-        const top = matches.slice(0, 5);
-        pendingScoutChoices.set(interaction.user.id, {
-          query: clubName,
-          results: top
-        });
-
-        const options = top.map((club, index) => {
-          const labelPlatform =
-            PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
-          const bits = [];
-
-          if (club.currentDivision)
-            bits.push(`Div ${club.currentDivision}`);
-          if (club.gamesPlayed)
-            bits.push(`${club.gamesPlayed} games`);
-          if (club.wins != null && club.losses != null)
-            bits.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
-
-          const description = `${labelPlatform}${
-            bits.length ? ' – ' + bits.join(' / ') : ''
-          }`.slice(0, 100);
-
-          return {
-            label: `${club.name} (${labelPlatform})`,
-            description,
-            value: String(index)
-          };
-        });
-
-        const select = new StringSelectMenuBuilder()
-          .setCustomId('scoutclub_pick')
-          .setPlaceholder('Select the correct club')
-          .addOptions(options);
-
-        const row = new ActionRowBuilder().addComponents(select);
-
-        const lines = top.map((club, index) => {
-          const labelPlatform =
-            PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
-          const parts = [labelPlatform];
-          if (club.currentDivision)
-            parts.push(`Div ${club.currentDivision}`);
-          if (club.gamesPlayed)
-            parts.push(`${club.gamesPlayed} games`);
-          if (club.wins != null && club.losses != null)
-            parts.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
-          const extra = parts.length ? ' – ' + parts.join(' / ') : '';
-          return `**${index + 1}.** ${club.name}${extra}`;
-        });
-
-        const embed = new EmbedBuilder()
-          .setTitle('Multiple clubs found')
-          .setDescription(
-            lines.join('\n') +
-              '\n\nUse the dropdown below to pick the club you want to scout.'
-          );
-
-        await interaction.editReply({
-          content: null,
-          embeds: [embed],
-          components: [row]
-        });
-
-        return;
-      }
-    }
-
-    // Select menu: user picks which club to scout
-    if (interaction.isStringSelectMenu()) {
-      if (interaction.customId === 'scoutclub_pick') {
-        const userId = interaction.user.id;
-        const state = pendingScoutChoices.get(userId);
-
-        if (!state) {
-          return interaction.reply({
-            content:
-              'No pending club selection found. Please run `/scoutclub` again.',
-            ephemeral: true
-          });
-        }
-
-        const index = parseInt(interaction.values[0], 10);
-        const chosen = state.results[index];
-        if (!chosen) {
-          return interaction.reply({
-            content: 'Invalid club selection. Please run `/scoutclub` again.',
-            ephemeral: true
-          });
-        }
-
-        // Remove pending state so we don't reuse it accidentally
-        pendingScoutChoices.delete(userId);
-
-        const labelPlatform =
-          PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
-
-        // Acknowledge quickly, then do the heavy work
-        await interaction.deferUpdate();
-
-        // Update the original message to show that we're working
-        await interaction.editReply({
-          content: `Generating scouting report for **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId})…`,
-          embeds: [],
-          components: []
-        });
-
-        try {
-          const { info, report } = await createScoutingReportFromId(
-            chosen.fcPlatform,
-            chosen.clubId,
-            chosen.name,
-            chosen.raw
-          );
-
-          const titleName = info?.name || chosen.name;
-          const text = report || 'No report generated.';
-          const trimmed =
-            text.length > 4000 ? text.slice(0, 4000) + '…' : text;
-
-          const embed = new EmbedBuilder()
-            .setTitle(
-              `Scouting report: ${titleName} (${labelPlatform}, ID: ${chosen.clubId})`
-            )
-            .setDescription(trimmed);
-
-          await interaction.editReply({ content: null, embeds: [embed] });
-        } catch (err) {
-          console.error('❌ Error creating scouting report (select):', err);
-
-          let msg =
-            'I found the club, but failed to generate a scouting report (EA or OpenAI error).';
-          if (
-            err.code === 'insufficient_quota' ||
-            err.error?.code === 'insufficient_quota'
-          ) {
-            msg =
-              'I found the club, but the OpenAI API quota has been exceeded. Please check your billing or try again later.';
-          } else if (
-            err.code === 'context_length_exceeded' ||
-            err.error?.code === 'context_length_exceeded'
-          ) {
-            msg =
-              'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.';
-          }
-
-          await interaction.editReply({
-            content: msg,
-            embeds: [],
-            components: []
-          });
-        }
-
-        return;
-      }
-    }
-  } catch (err) {
-    console.error('❌ Error handling interaction:', err);
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: 'Error.',
-        ephemeral: true
-      });
-    }
-  }
-});
-
-/* -------------------- LOGIN -------------------- */
-
-client.login(token);
+              text.length > 4000 ? text.slice(
