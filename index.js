@@ -5,7 +5,8 @@ const {
   EmbedBuilder,
   ActionRowBuilder,
   StringSelectMenuBuilder,
-  ApplicationCommandOptionType
+  ApplicationCommandOptionType,
+  MessageFlags
 } = require('discord.js');
 
 const axios = require('axios');
@@ -214,7 +215,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // If only one result, go straight to the report
         if (matches.length === 1) {
           const chosen = matches[0];
-          const labelPlatform = PLATFORM_LABELS[chosen.platform] || chosen.platform;
+          const labelPlatform =
+            PLATFORM_LABELS[chosen.platform] || chosen.platform;
 
           await interaction.editReply(
             `Found one match: **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId}). Generating scouting report…`
@@ -257,7 +259,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
 
         const options = top.map((club, index) => {
-          const labelPlatform = PLATFORM_LABELS[club.platform] || club.platform;
+          const labelPlatform =
+            PLATFORM_LABELS[club.platform] || club.platform;
           const labelRegion = club.region ? ` – ${club.region}` : '';
           const labelDivision = club.division ? ` – Div ${club.division}` : '';
 
@@ -279,7 +282,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const row = new ActionRowBuilder().addComponents(select);
 
         const lines = top.map((club, index) => {
-          const labelPlatform = PLATFORM_LABELS[club.platform] || club.platform;
+          const labelPlatform =
+            PLATFORM_LABELS[club.platform] || club.platform;
           const parts = [labelPlatform];
           if (club.region) parts.push(club.region);
           if (club.division) parts.push(`Div ${club.division}`);
@@ -314,7 +318,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.reply({
             content:
               'No pending club selection found. Please run `/scoutclub` again.',
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
@@ -323,7 +327,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!chosen) {
           return interaction.reply({
             content: 'Invalid club selection. Please run `/scoutclub` again.',
-            ephemeral: true
+            flags: MessageFlags.Ephemeral
           });
         }
 
@@ -380,7 +384,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.replied && !interaction.deferred) {
       await interaction.reply({
         content: 'Error.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
   }
@@ -389,4 +393,3 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // -------------------- LOGIN --------------------
 
 client.login(token);
-
