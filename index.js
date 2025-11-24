@@ -31,27 +31,17 @@ const openai = new OpenAI({ apiKey: openaiApiKey });
 
 /* -------------------- CONSTANTS -------------------- */
 
-// FC platforms to try when searching leaderboard
-const FC_PLATFORMS = [
-  'common-gen5',
-  'common-gen4',
-  'ps5',
-  'ps4',
-  'xbox-series-xs',
-  'xboxone'
-];
-
 const PLATFORM_LABELS = {
   'common-gen5': 'Cross-gen (Gen5)',
   'common-gen4': 'Cross-gen (Gen4)',
-  ps5: 'PlayStation 5',
-  ps4: 'PlayStation 4',
+  'ps5': 'PlayStation 5',
+  'ps4': 'PlayStation 4',
   'xbox-series-xs': 'Xbox Series X|S',
-  xboxone: 'Xbox One',
-  pc: 'PC'
+  'xboxone': 'Xbox One',
+  'pc': 'PC'
 };
 
-// Headers to make EA think we’re a normal browser
+// Headers to talk directly to EA's Pro Clubs API
 const EA_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
@@ -60,6 +50,17 @@ const EA_HEADERS = {
   origin: 'https://www.ea.com',
   referer: 'https://www.ea.com/',
   'sec-ch-ua-platform': '"Windows"'
+};
+
+// Headers for scraping proclubstats.com HTML
+const PROCLUBS_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+  accept:
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  DNT: '1',
+  referer: 'https://proclubstats.com/',
+  origin: 'https://proclubstats.com'
 };
 
 // Store pending choices per user for the select menu
@@ -105,15 +106,13 @@ You’ll see three logical chunks of JSON:
 3. **Match history JSON** – grouped into:
    - League matches (recent league performance)
    - Playoff matches (high-pressure matches)
-   - Friendly matches (scrims / tournament-style games)
+   - Friendly matches (often used for scrims and tournaments; treat these as **very important** for understanding tendencies, roughly on par with league matches)
 
 When reasoning:
 - Use overall stats for **big-picture quality** and long-term strengths/weaknesses.
 - Use match history for **recent form** and **patterns** (e.g., always concede late, win big, high-scoring games, etc.) *only if the data clearly supports it*.
+- Use friendly matches heavily for style & patterns, especially since many tournaments are played as friendlies.
 - Use player stats to identify **key attackers**, **playmakers**, and **defensive anchors**. Only call someone a “key player” if their stats clearly stand out (more games, more goals/assists, higher ratings, etc.).
-- Treat **friendly matches as especially important for tournament-style scouting**:
-  - If the friendly sample is large or clearly more recent, lean on friendlies to infer tactical tendencies and mentality.
-  - Still cross-check with league/playoff data where available.
 
 If timestamps, seasons, or ordering fields are present:
 - You may comment on trends over time (e.g. “recently improved”, “current slump”).
@@ -122,11 +121,10 @@ If there is no clear chronological indicator:
 
 ### Style & structure
 
-Address the report to a **coach preparing to play this team in serious matches or tournaments**.
-
-Be **clear, concise, and practical**.
-Do **not** mention JSON, fields, or technical details. Just talk football.
-Avoid filler and hype. Focus on what a serious competitive team would care about.
+- Address the report to a **coach preparing to play (or join) this team**.
+- Be **clear, concise, and practical**.
+- Do **not** mention JSON, fields, or technical details. Just talk football.
+- Avoid filler and hype. Focus on what a serious competitive team would care about.
 
 Organize the report with headings like:
 
@@ -137,13 +135,11 @@ Organize the report with headings like:
    - How often they score.
    - Whether they seem direct vs possession-based (if shot counts, pass counts, or relevant stats exist).
    - Preferred threats: through the middle vs wide, headers vs long shots, etc. (only if supported).
-   - If friendlies show different attacking behavior from league/playoffs, mention that difference.
 
 3. **Defensive Tendencies**
    - Goals conceded, clean sheet rate.
    - Patterns: concede early/late, vulnerable to counters, weak defending crosses, etc. (only if supported).
    - Discipline if cards/fouls are present.
-   - If friendlies show different defensive behavior (e.g., more open or more compact), call that out.
 
 4. **Key Players & Roles**
    - 3–6 standout players, with:
@@ -152,8 +148,7 @@ Organize the report with headings like:
    - Do not list every player. Focus on the clearest standouts.
 
 5. **Recent Form & Mentality**
-   - Use the most recent slice of **friendlies and league/playoff matches** provided.
-   - If friendlies form looks more representative (e.g., more recent or larger sample), weigh that heavily.
+   - Use the most recent slice of league/playoff/friendly matches provided.
    - Win/loss tendencies, blowouts vs tight games, comebacks/choking if the data supports it.
 
 6. **Game Plan to Beat Them**
@@ -162,14 +157,14 @@ Organize the report with headings like:
      - If they concede many goals from crosses or headers, suggest overloading wide areas and attacking the back post.
      - If they score many counterattack goals with a specific striker, suggest a deeper line or dedicated cover.
      - If they struggle in close games or concede late, suggest sustained pressure late in each half.
-     - If friendlies show a very open style (high-scoring, end-to-end), recommend ways to punish that in tournament scenarios.
+     - If their friendlies show a very different style from league games, prioritize what you see in **friendlies plus playoffs** for tournament prep.
    - Avoid generic advice like “play your game” or “just focus”; every point should be clearly linked to a real tendency in the data.
 
 7. **Uncertainties & Data Gaps (if needed)**
    - Briefly list anything that limits confidence (missing stats, truncated history, few matches, etc.).
 
 Keep the entire report **under ~3500 characters** if possible, but do not sacrifice important insights to be shorter.
-`.trim();
+`;
 
 function buildUserPrompt({
   displayName,
@@ -205,73 +200,156 @@ Instructions:
 
 - Treat these blobs as your only source of truth.
 - Only talk about players, stats, and patterns that you can reasonably derive from these JSON structures.
-- Pay **special attention to friendlyMatches** when inferring tactical tendencies and game plans, especially for tournament-style matchups, but always cross-check with league/playoff data when available.
 - If any of the JSON is clearly partial or truncated, treat that section as partial data.
 - If something important (like positions, cards, or timestamps) is missing, acknowledge that briefly instead of guessing.
 
-Now, using ONLY this data, write the scouting report as described in the system message. Do not restate the raw JSON; just output the final report with the requested headings and football analysis.
-`.trim();
+Now, using ONLY this data, write the scouting report as described in the system message. Do not restate the raw JSON; just output the final report with the requested headings and football analysis.`;
 }
 
-/* -------------------- EA HELPERS -------------------- */
+/* -------------------- UTILS -------------------- */
 
-// Search clubs using the FC all-time leaderboard endpoint across multiple platforms
+function safeJsonStringify(obj, maxChars) {
+  try {
+    const s = JSON.stringify(obj);
+    if (!maxChars) return s;
+    return s.length > maxChars ? s.slice(0, maxChars) : s;
+  } catch (e) {
+    return String(obj || '').slice(0, maxChars || 8000);
+  }
+}
+
+/* -------------------- PROCLUBSTATS SCRAPING HELPERS -------------------- */
+
+// Reproduce the slugify() logic used by proclubstats.com team pages.
+function slugifyProclubsName(text) {
+  if (!text) return '';
+  return text
+    .toString()
+    .toLowerCase()
+    .replace(/\s+/g, '_') // spaces -> underscores
+    .replace(/[^\w\-]+/g, '') // strip non word chars
+    .replace(/_+/g, '_') // collapse multiple underscores
+    .replace(/^_+|_+$/g, ''); // trim leading/trailing underscores
+}
+
+// Parse a proclubstats.com team page HTML to get clubId and platform
+function parseProclubsTeamPage(html, queryName, fallbackPlatform, sourceUrl) {
+  if (typeof html !== 'string') return null;
+
+  const slugTarget = slugifyProclubsName(queryName);
+
+  // Look for a details block whose name slug matches our target
+  const detailsRegex =
+    /\["name"\]\s*=>\s*(?:string\(\d+\)\s*)?"([^"]+)"[\s\S]{0,300}?\["clubId"\]\s*=>\s*(?:string\(\d+\)\s*)?(?:int\()?([0-9]+)\)?/g;
+
+  let best = null;
+  let match;
+  while ((match = detailsRegex.exec(html)) !== null) {
+    const name = match[1];
+    const clubId = match[2];
+    const slug = slugifyProclubsName(name);
+    if (slug === slugTarget) {
+      best = { name, clubId };
+      break;
+    }
+    if (!best && slug && slug.includes(slugTarget)) {
+      best = { name, clubId };
+    }
+  }
+
+  // If we didn't find any matching details block, fall back to first clubId in page
+  if (!best) {
+    const fallbackIdMatch = html.match(
+      /\["clubId"\]\s*=>\s*(?:string\(\d+\)\s*)?(?:int\()?([0-9]+)\)?/
+    );
+    if (!fallbackIdMatch) {
+      return null;
+    }
+    best = { name: queryName, clubId: fallbackIdMatch[1] };
+  }
+
+  const teamNameMatch = html.match(/var\s+teamName\s*=\s*"([^"]+)"/i);
+  const platformMatch = html.match(/var\s+platform\s*=\s*"([^"]+)"/i);
+
+  const platform =
+    platformMatch && platformMatch[1]
+      ? platformMatch[1]
+      : fallbackPlatform || 'common-gen5';
+
+  const teamNameVar =
+    teamNameMatch && teamNameMatch[1] ? teamNameMatch[1] : best.name;
+
+  return {
+    fcPlatform: platform,
+    clubId: String(best.clubId),
+    name: teamNameVar || best.name,
+    currentDivision: null,
+    wins: null,
+    losses: null,
+    ties: null,
+    gamesPlayed: null,
+    goals: null,
+    goalsAgainst: null,
+    raw: {
+      source: 'proclubstats',
+      url: sourceUrl
+    }
+  };
+}
+
+// Search for clubs by name using proclubstats.com instead of EA leaderboard
 async function searchClubsByName(query) {
-  const q = query.trim();
+  const q = (query || '').trim();
   if (!q) return [];
+
+  const slug = slugifyProclubsName(q);
+
+  // Try likely platforms – proclubstats uses `platform` query param
+  const platformsToTry = [
+    'common-gen5',
+    'ps5',
+    'xbox-series-xs',
+    'pc',
+    'common-gen4',
+    'ps4',
+    'xboxone'
+  ];
 
   const results = [];
 
   await Promise.all(
-    FC_PLATFORMS.map(async (platform) => {
+    platformsToTry.map(async (platform) => {
+      const url = `https://proclubstats.com/team/${encodeURIComponent(
+        slug
+      )}?platform=${encodeURIComponent(platform)}`;
+
       try {
-        const res = await axios.get(
-          'https://proclubs.ea.com/api/fc/allTimeLeaderboard/search',
-          {
-            params: {
-              platform,
-              clubName: q
-            },
-            headers: EA_HEADERS,
-            timeout: 8000
-          }
-        );
+        const res = await axios.get(url, {
+          headers: PROCLUBS_HEADERS,
+          timeout: 8000,
+          validateStatus: () => true
+        });
 
-        const data = res.data;
-        let items;
-
-        if (Array.isArray(data)) {
-          items = data;
-        } else if (Array.isArray(data?.entries)) {
-          items = data.entries;
-        } else {
-          console.warn('⚠️ Unexpected leaderboard search shape:', data);
+        if (res.status !== 200) {
+          // 404 etc are normal when a club doesn't exist for that platform
+          console.warn(
+            `⚠️ proclubstats search: HTTP ${res.status} for ${url}`
+          );
           return;
         }
 
-        for (const item of items) {
-          if (!item) continue;
-          const clubId =
-            String(item.clubId ?? item.clubInfo?.clubId ?? '').trim();
-          if (!clubId) continue;
-
-          results.push({
-            fcPlatform: item.platform || platform,
-            clubId,
-            name: item.clubName || item.clubInfo?.name || q,
-            currentDivision: item.currentDivision || item.bestDivision || null,
-            wins: item.wins ?? null,
-            losses: item.losses ?? null,
-            ties: item.ties ?? null,
-            gamesPlayed: item.gamesPlayed ?? null,
-            goals: item.goals ?? null,
-            goalsAgainst: item.goalsAgainst ?? null,
-            raw: item
-          });
+        const parsed = parseProclubsTeamPage(
+          res.data,
+          q,
+          platform,
+          url
+        );
+        if (parsed) {
+          results.push(parsed);
         }
       } catch (err) {
         console.error(
-          `⚠️ EA leaderboard search error for platform=${platform}, query="${q}":`,
+          `⚠️ Error scraping proclubstats for platform=${platform}, query="${q}":`,
           err.toString()
         );
       }
@@ -291,7 +369,8 @@ async function searchClubsByName(query) {
   return unique;
 }
 
-// Fetch detailed club data from FC endpoints
+/* -------------------- EA FETCH HELPERS -------------------- */
+
 async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
   const platform = fcPlatform || 'common-gen5';
   const clubIdsParam = String(clubId);
@@ -330,27 +409,33 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
         timeout: 8000
       }
     ),
-    membersSeason: axios.get('https://proclubs.ea.com/api/fc/members/stats', {
-      params: singleClubParams,
-      headers: EA_HEADERS,
-      timeout: 8000
-    }),
-    leagueMatches: axios.get('https://proclubs.ea.com/api/fc/clubs/matches', {
-      params: {
-        ...clubParams,
-        matchType: 'leagueMatch',
-        maxResultCount: 40
-      },
-      headers: EA_HEADERS,
-      timeout: 10000
-    }),
+    membersSeason: axios.get(
+      'https://proclubs.ea.com/api/fc/members/stats',
+      {
+        params: singleClubParams,
+        headers: EA_HEADERS,
+        timeout: 8000
+      }
+    ),
+    leagueMatches: axios.get(
+      'https://proclubs.ea.com/api/fc/clubs/matches',
+      {
+        params: {
+          ...clubParams,
+          matchType: 'leagueMatch',
+          maxResultCount: 50
+        },
+        headers: EA_HEADERS,
+        timeout: 10000
+      }
+    ),
     playoffMatches: axios.get(
       'https://proclubs.ea.com/api/fc/clubs/matches',
       {
         params: {
           ...clubParams,
           matchType: 'playoffMatch',
-          maxResultCount: 40
+          maxResultCount: 50
         },
         headers: EA_HEADERS,
         timeout: 10000
@@ -362,7 +447,7 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
         params: {
           ...clubParams,
           matchType: 'friendlyMatch',
-          maxResultCount: 60 // allow a bit more friendlies – they matter for tournament prep
+          maxResultCount: 50
         },
         headers: EA_HEADERS,
         timeout: 10000
@@ -407,10 +492,9 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
     clubInfo = infoRaw[clubIdsParam] || infoRaw;
   }
 
-  // Build compact payloads for OpenAI (but keep data rich)
   const infoPayload = {
     clubInfo,
-    leaderboardSeed // includes wins/losses/goals etc from search
+    leaderboardSeed // includes URL + source from proclubstats
   };
 
   const statsPayload = {
@@ -445,16 +529,13 @@ async function createScoutingReportFromId(
     throw new Error('OPENAI_API_KEY is not set.');
   }
 
-  const { infoPayload, statsPayload, matchesPayload } = await fetchClubData(
-    fcPlatform,
-    clubId,
-    leaderboardSeed
-  );
+  const { infoPayload, statsPayload, matchesPayload } =
+    await fetchClubData(fcPlatform, clubId, leaderboardSeed);
 
-  // Stringify with minimal whitespace to keep context smaller & faster
-  const infoStr = JSON.stringify(infoPayload);
-  const statsStr = JSON.stringify(statsPayload);
-  const matchesStr = JSON.stringify(matchesPayload);
+  // Stringify with limits to avoid context explosion
+  const infoStr = safeJsonStringify(infoPayload, 8000);
+  const statsStr = safeJsonStringify(statsPayload, 24000);
+  const matchesStr = safeJsonStringify(matchesPayload, 24000);
 
   const inputText = buildUserPrompt({
     displayName,
@@ -489,7 +570,6 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
   console.log(`✅ App ID: ${c.application.id}`);
 
-  // Global command registration so it works on every server the bot is in
   await c.application.commands.set([
     {
       name: 'scoutclub',
@@ -526,7 +606,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (!matches.length) {
           await interaction.editReply(
-            'I could not find any clubs matching that name on EA FC servers. Try a different spelling or the exact in-game name.'
+            'I could not find any clubs matching that name on proclubstats.com. Try a different spelling or the exact in-game name.'
           );
           return;
         }
@@ -587,7 +667,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        // Multiple results: let user choose via dropdown
+        // Multiple results: let user choose via dropdown (in practice, proclubstats will usually give at most 1 per platform)
         const top = matches.slice(0, 5);
         pendingScoutChoices.set(interaction.user.id, {
           query: clubName,
@@ -597,16 +677,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const options = top.map((club, index) => {
           const labelPlatform =
             PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
-          const bits = [];
 
-          if (club.currentDivision) bits.push(`Div ${club.currentDivision}`);
-          if (club.gamesPlayed) bits.push(`${club.gamesPlayed} games`);
-          if (club.wins != null && club.losses != null)
-            bits.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
-
-          const description = `${labelPlatform}${
-            bits.length ? ' – ' + bits.join(' / ') : ''
-          }`.slice(0, 100);
+          const description = `${labelPlatform}`.slice(0, 100);
 
           return {
             label: `${club.name} (${labelPlatform})`,
@@ -626,10 +698,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const labelPlatform =
             PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
           const parts = [labelPlatform];
-          if (club.currentDivision) parts.push(`Div ${club.currentDivision}`);
-          if (club.gamesPlayed) parts.push(`${club.gamesPlayed} games`);
-          if (club.wins != null && club.losses != null)
-            parts.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
           const extra = parts.length ? ' – ' + parts.join(' / ') : '';
           return `**${index + 1}.** ${club.name}${extra}`;
         });
@@ -680,10 +748,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const labelPlatform =
           PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
 
-        // Acknowledge quickly, then do the heavy work
         await interaction.deferUpdate();
 
-        // Update the original message to show that we're working
         await interaction.editReply({
           content: `Generating scouting report for **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId})…`,
           embeds: [],
