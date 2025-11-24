@@ -1,3 +1,5 @@
+
+
 // index.js – ScoutBot (FC Pro Clubs Scouting)
 
 /* -------------------- IMPORTS -------------------- */
@@ -365,7 +367,7 @@ function parseProclubsTeamPage(html, queryName, fallbackPlatform, sourceUrl) {
   const stadiumMatch = html.match(
     /data-lucide="map-pin"[^>]*><\/i>\s*([^<]+)/i
   );
-  const stadiumName = stadiumMatch ? stadiumName[1].trim() : null;
+  const stadiumName = stadiumMatch ? stadiumMatch[1].trim() : null;
 
   // Recent (Last 5 Matches) summary block
   let recentForm = null;
@@ -427,7 +429,7 @@ function parseProclubsTeamPage(html, queryName, fallbackPlatform, sourceUrl) {
       played: toInt(pl),
       wins: toInt(w),
       draws: toInt(d),
-      losses: toInt(l),
+            losses: toInt(l),
       goalsFor: toInt(gf),
       goalsAgainst: toInt(ga),
       goalDiff: toInt(gd),
@@ -742,19 +744,41 @@ function computeRecord(matches, clubId) {
   return { played, wins, draws, losses, goalsFor, goalsAgainst, goalDiff };
 }
 
-async function summarizeMatchesForClub(fcPlatform, clubId, displayName, leaderboardSeed) {
-  const { matchesPayload } = await fetchClubData(fcPlatform, clubId, leaderboardSeed);
+async function summarizeMatchesForClub(
+  fcPlatform,
+  clubId,
+  displayName,
+  leaderboardSeed
+) {
+  const { matchesPayload } = await fetchClubData(
+    fcPlatform,
+    clubId,
+    leaderboardSeed
+  );
 
-  const empty = { played: 0, wins: 0, draws: 0, losses: 0, goalsFor: 0, goalsAgainst: 0, goalDiff: 0 };
+  const empty = {
+    played: 0,
+    wins: 0,
+    draws: 0,
+    losses: 0,
+    goalsFor: 0,
+    goalsAgainst: 0,
+    goalDiff: 0
+  };
 
   const league = computeRecord(matchesPayload.leagueMatches, clubId) || empty;
-  const playoffs = computeRecord(matchesPayload.playoffMatches, clubId) || empty;
-  const friendlies = computeRecord(matchesPayload.friendlyMatches, clubId) || empty;
+  const playoffs =
+    computeRecord(matchesPayload.playoffMatches, clubId) || empty;
+  const friendlies =
+    computeRecord(matchesPayload.friendlyMatches, clubId) || empty;
 
   function formatLine(label, rec) {
     if (!rec.played) return `${label}: no matches in last 50.`;
-    const { played, wins, draws, losses, goalsFor, goalsAgainst, goalDiff } = rec;
-    return `${label}: ${wins}-${draws}-${losses} in ${played} matches, GF ${goalsFor} / GA ${goalsAgainst} (GD ${goalDiff >= 0 ? '+' : ''}${goalDiff})`;
+    const { played, wins, draws, losses, goalsFor, goalsAgainst, goalDiff } =
+      rec;
+    return `${label}: ${wins}-${draws}-${losses} in ${played} matches, GF ${goalsFor} / GA ${goalsAgainst} (GD ${
+      goalDiff >= 0 ? '+' : ''
+    }${goalDiff})`;
   }
 
   const lines = [
@@ -1219,4 +1243,66 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         const index = parseInt(interaction.values[0], 10);
-     
+        const chosen = state.results[index];
+        if (!chosen) {
+          return interaction.reply({
+            content: 'Invalid club selection. Please run `/clubmatches` again.',
+            ephemeral: true
+          });
+        }
+
+        // Remove pending state so we don't reuse it accidentally
+        pendingMatchesChoices.delete(userId);
+
+        const labelPlatform =
+          PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
+
+        await interaction.deferUpdate();
+
+        await interaction.editReply({
+          content: `Fetching last 50 matches for **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId})…`,
+          embeds: [],
+          components: []
+        });
+
+        try {
+          const summaryText = await summarizeMatchesForClub(
+            chosen.fcPlatform,
+            chosen.clubId,
+            chosen.name,
+            chosen.raw
+          );
+
+          await interaction.editReply({
+            content: summaryText,
+            embeds: [],
+            components: []
+          });
+        } catch (err) {
+          console.error('❌ Error summarizing last 50 matches (select):', err);
+
+          await interaction.editReply({
+            content:
+              'I found the club, but failed to fetch match history from EA.',
+            embeds: [],
+            components: []
+          });
+        }
+
+        return;
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error handling interaction:', err);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: 'Error.',
+        ephemeral: true
+      });
+    }
+  }
+});
+
+/* -------------------- LOGIN -------------------- */
+
+client.login(token);
