@@ -129,6 +129,24 @@ function normalizeMatches(data, clubId) {
   return [];
 }
 
+// Generic helper to trim arrays
+function trimArray(arr, max) {
+  if (!Array.isArray(arr)) return arr;
+  return arr.slice(0, max);
+}
+
+// Helper to safely JSON.stringify with character limit
+function stringifyLimited(obj, label, maxChars) {
+  try {
+    const raw = JSON.stringify(obj);
+    if (raw.length <= maxChars) return raw;
+    return raw.slice(0, maxChars) + `...(truncated ${label})`;
+  } catch (e) {
+    console.warn(`⚠️ Failed to stringify ${label}:`, e.toString());
+    return String(obj);
+  }
+}
+
 // -------------------- CLUB SEARCH (allTimeLeaderboard/search) --------------------
 
 /**
@@ -206,13 +224,14 @@ async function createScoutingReportFromId(fcPlatform, clubId, displayName) {
     throw new Error('OPENAI_API_KEY is not set.');
   }
 
-  // Pull as much team history + context as we reasonably can
+  // Pull as much team history + context as we reasonably can,
+  // but we will trim before sending to OpenAI to avoid context overflow.
   const [
     infoRaw,
     overallStatsRaw,
     playoffAchievements,
-    membersCareerStats,
-    membersStats,
+    membersCareerStatsRaw,
+    membersStatsRaw,
     leagueMatchesRaw,
     playoffMatchesRaw,
     friendlyMatchesRaw
@@ -257,7 +276,7 @@ async function createScoutingReportFromId(fcPlatform, clubId, displayName) {
       },
       `members/stats clubId=${clubId}`
     ),
-    // History: league, playoff, friendlies – up to 50 each
+    // History: league, playoff, friendlies – we'll hard-limit with maxResultCount
     safeEaGet(
       '/clubs/matches',
       {
@@ -293,9 +312,22 @@ async function createScoutingReportFromId(fcPlatform, clubId, displayName) {
   const info = normalizeClubObject(infoRaw, clubId);
   const overallStats = normalizeClubObject(overallStatsRaw, clubId);
 
-  const leagueMatches = normalizeMatches(leagueMatchesRaw, clubId);
-  const playoffMatches = normalizeMatches(playoffMatchesRaw, clubId);
-  const friendlyMatches = normalizeMatches(friendlyMatchesRaw, clubId);
+  const leagueMatchesAll = normalizeMatches(leagueMatchesRaw, clubId);
+  const playoffMatchesAll = normalizeMatches(playoffMatchesRaw, clubId);
+  const friendlyMatchesAll = normalizeMatches(friendlyMatchesRaw, clubId);
+
+  // Trim big arrays to avoid blowing the context window
+  const leagueMatches = trimArray(leagueMatchesAll, 30);    // last 30 league games
+  const playoffMatches = trimArray(playoffMatchesAll, 20);  // last 20 playoffs
+  const friendlyMatches = trimArray(friendlyMatchesAll, 20); // last 20 friendlies
+
+  const membersCareerStats = Array.isArray(membersCareerStatsRaw)
+    ? trimArray(membersCareerStatsRaw, 30) // top 30 players by whatever order EA gives
+    : membersCareerStatsRaw;
+
+  const membersStats = Array.isArray(membersStatsRaw)
+    ? trimArray(membersStatsRaw, 30)
+    : membersStatsRaw;
 
   // Pack stats together so GPT has a consistent structure
   const stats = {
@@ -311,6 +343,15 @@ async function createScoutingReportFromId(fcPlatform, clubId, displayName) {
     friendlyMatches
   };
 
+  // Hard limit JSON sizes before sending to OpenAI
+  const infoStr = stringifyLimited(info ?? {}, 'club info', 8000);
+  const statsStr = stringifyLimited(stats, 'club stats', 15000);
+  const matchesStr = stringifyLimited(
+    matchesPayload,
+    'match history',
+    25000
+  );
+
   const inputText =
     `You are an experienced EA FC Pro Clubs tactical analyst. ` +
     `Given raw JSON stats and match history, write a concise scouting report for a competitive team.\n\n` +
@@ -323,11 +364,9 @@ async function createScoutingReportFromId(fcPlatform, clubId, displayName) {
     `Club display name: ${displayName}\n` +
     `EA internal club ID: ${clubId}\n` +
     `FC web platform: ${fcPlatform}\n\n` +
-    `Club info JSON:\n${JSON.stringify(info)}\n\n` +
-    `Club stats JSON (overall + players + playoffs):\n${JSON.stringify(stats)}\n\n` +
-    `Match history JSON (league, playoff, friendlies; up to 50 each, most recent first):\n${JSON.stringify(
-      matchesPayload
-    )}\n\n` +
+    `Club info JSON (possibly truncated):\n${infoStr}\n\n` +
+    `Club stats JSON (overall + players + playoffs, possibly truncated):\n${statsStr}\n\n` +
+    `Match history JSON (league, playoff, friendlies; trimmed and possibly truncated):\n${matchesStr}\n\n` +
     `If some fields are missing or unclear, say that and base your analysis on what you do have. ` +
     `When you reference top performers, make sure they are actually among the best ` +
     `in the provided member stats (goals, assists, appearances, rating).`;
@@ -339,7 +378,8 @@ async function createScoutingReportFromId(fcPlatform, clubId, displayName) {
         role: 'system',
         content:
           'You are an EA FC Pro Clubs opposition scout. Always be clear, concise, and practical. ' +
-          'Do not invent matches or players that are not supported by the JSON.'
+          'Do not invent matches or players that are not supported by the JSON. ' +
+          'If any JSON appears truncated, acknowledge that and work with what you see.'
       },
       {
         role: 'user',
@@ -585,4 +625,3 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // -------------------- LOGIN --------------------
 
 client.login(token);
-
