@@ -34,11 +34,11 @@ const openai = new OpenAI({ apiKey: openaiApiKey });
 const PLATFORM_LABELS = {
   'common-gen5': 'Cross-gen (Gen5)',
   'common-gen4': 'Cross-gen (Gen4)',
-  'ps5': 'PlayStation 5',
-  'ps4': 'PlayStation 4',
+  ps5: 'PlayStation 5',
+  ps4: 'PlayStation 4',
   'xbox-series-xs': 'Xbox Series X|S',
-  'xboxone': 'Xbox One',
-  'pc': 'PC'
+  xboxone: 'Xbox One',
+  pc: 'PC'
 };
 
 // Headers to talk directly to EA's Pro Clubs API
@@ -114,6 +114,26 @@ When reasoning:
 - Use friendly matches heavily for style & patterns, especially since many tournaments are played as friendlies.
 - Use player stats to identify **key attackers**, **playmakers**, and **defensive anchors**. Only call someone a “key player” if their stats clearly stand out (more games, more goals/assists, higher ratings, etc.).
 
+### Derived metrics & deeper analysis
+
+Whenever the fields exist, derive **concrete metrics** instead of just restating raw numbers. For example:
+- Overall & mode-specific metrics:
+  - Win rate, draw rate, loss rate for league / playoffs / friendlies.
+  - Goals scored per game and conceded per game (GF/GP, GA/GP) by mode.
+  - Average goal difference per game and how often matches are decided by 1 goal vs 2+ goals.
+- Attacking efficiency:
+  - Share of total goals contributed by top 1–3 scorers (how dependent they are on certain players).
+  - Goals + assists per game or per 90 minutes for key players (if minutes or games exist).
+  - If shots/expected goals exist, comment on conversion (clinical vs wasteful) without inventing concrete numbers.
+- Defensive profile:
+  - Clean-sheet rate, frequency of conceding 2+ goals.
+  - If card/foul data exists, comment on aggression vs discipline.
+- Mode comparison:
+  - Compare league vs playoff vs friendly performance (e.g., better in friendlies than league, or vice versa).
+  - Highlight if friendlies suggest a more attacking / open style than league.
+
+Only compute metrics that are clearly supported by the available fields. When the data is thin, say so instead of stretching it.
+
 If timestamps, seasons, or ordering fields are present:
 - You may comment on trends over time (e.g. “recently improved”, “current slump”).
 If there is no clear chronological indicator:
@@ -130,6 +150,7 @@ Organize the report with headings like:
 
 1. **Overall Summary**
    - Short paragraph with overall quality, rough level, and identity.
+   - Include 1–3 headline metrics (overall win rate, GF/GA per game, or similar) if you can.
 
 2. **Attacking Tendencies**
    - How often they score.
@@ -145,11 +166,13 @@ Organize the report with headings like:
    - 3–6 standout players, with:
      - Their apparent position or role (inferred from stats or any position fields).
      - Why they are important (goals, assists, games played, rating, etc.).
+   - Highlight how concentrated their goal creation is (e.g. top 2 players responsible for most goals) when supported.
    - Do not list every player. Focus on the clearest standouts.
 
 5. **Recent Form & Mentality**
    - Use the most recent slice of league/playoff/friendly matches provided.
    - Win/loss tendencies, blowouts vs tight games, comebacks/choking if the data supports it.
+   - If there is a big contrast between friendlies and league/playoffs, call that out.
 
 6. **Game Plan to Beat Them**
    - Make this section **as specific and concrete as possible**, but only when the data clearly supports it.
@@ -199,6 +222,7 @@ ${matchesStr}
 Instructions:
 
 - Treat these blobs as your only source of truth.
+- Before you start writing, scan these blobs and mentally compute as many **summary and per-game metrics** as you can (win rate, goals for/against per match, contribution of top scorers, clean-sheet rate, etc.) wherever the data allows.
 - Only talk about players, stats, and patterns that you can reasonably derive from these JSON structures.
 - If any of the JSON is clearly partial or truncated, treat that section as partial data.
 - If something important (like positions, cards, or timestamps) is missing, acknowledge that briefly instead of guessing.
@@ -216,6 +240,41 @@ function safeJsonStringify(obj, maxChars) {
   } catch (e) {
     return String(obj || '').slice(0, maxChars || 8000);
   }
+}
+
+function isNonEmpty(value) {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function countMatches(raw) {
+  if (!raw) return 0;
+  if (Array.isArray(raw)) return raw.length;
+  if (Array.isArray(raw.matches)) return raw.matches.length;
+  if (typeof raw === 'object') {
+    let total = 0;
+    for (const v of Object.values(raw)) {
+      if (Array.isArray(v)) total += v.length;
+      else if (v && Array.isArray(v.matches)) total += v.matches.length;
+    }
+    return total;
+  }
+  return 0;
+}
+
+function countPlayers(raw) {
+  if (!raw) return 0;
+  if (Array.isArray(raw)) return raw.length;
+  if (typeof raw === 'object') {
+    let total = 0;
+    for (const v of Object.values(raw)) {
+      if (Array.isArray(v)) total += v.length;
+    }
+    return total || Object.keys(raw).length;
+  }
+  return 0;
 }
 
 /* -------------------- PROCLUBSTATS SCRAPING HELPERS -------------------- */
@@ -532,6 +591,35 @@ async function createScoutingReportFromId(
   const { infoPayload, statsPayload, matchesPayload } =
     await fetchClubData(fcPlatform, clubId, leaderboardSeed);
 
+  const hasInfo = isNonEmpty(infoPayload?.clubInfo);
+  const hasStats = Object.values(statsPayload).some(isNonEmpty);
+  const hasMatches = Object.values(matchesPayload).some(isNonEmpty);
+
+  const leagueCount = countMatches(matchesPayload.leagueMatches);
+  const playoffCount = countMatches(matchesPayload.playoffMatches);
+  const friendlyCount = countMatches(matchesPayload.friendlyMatches);
+  const careerPlayers = countPlayers(statsPayload.membersCareer);
+  const seasonPlayers = countPlayers(statsPayload.membersSeason);
+
+  console.log('[DEBUG] Data summary for club', clubId, '(', fcPlatform, '):', {
+    hasInfo,
+    hasStats,
+    hasMatches,
+    leagueCount,
+    playoffCount,
+    friendlyCount,
+    careerPlayers,
+    seasonPlayers
+  });
+
+  if (!hasStats && !hasMatches) {
+    const err = new Error(
+      'No stats or match history available from EA for this club.'
+    );
+    err.code = 'insufficient_data';
+    throw err;
+  }
+
   // Stringify with limits to avoid context explosion
   const infoStr = safeJsonStringify(infoPayload, 8000);
   const statsStr = safeJsonStringify(statsPayload, 24000);
@@ -656,6 +744,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ) {
               await interaction.editReply(
                 'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.'
+              );
+            } else if (
+              err.code === 'insufficient_data' ||
+              err.error?.code === 'insufficient_data'
+            ) {
+              await interaction.editReply(
+                'I found the club, but EA did not return enough stats or match history to generate a meaningful, data-driven scouting report.'
               );
             } else {
               await interaction.editReply(
@@ -793,6 +888,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ) {
             msg =
               'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.';
+          } else if (
+            err.code === 'insufficient_data' ||
+            err.error?.code === 'insufficient_data'
+          ) {
+            msg =
+              'I found the club, but EA did not return enough stats or match history to generate a meaningful, data-driven scouting report.';
           }
 
           await interaction.editReply({
