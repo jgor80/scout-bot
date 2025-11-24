@@ -168,12 +168,12 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
   console.log(`✅ App ID: ${c.application.id}`);
 
-  // Only one command: /scoutclub (approximate club name, all platforms searched)
+  // Global command registration so it works on every server the bot is in
   await c.application.commands.set([
     {
       name: 'scoutclub',
       description:
-        'Look up an EA FC Pro Clubs team by name and generate a scouting report.',
+        'Look up an EA FC Pro Clubs team by name & generate a scouting report.',
       options: [
         {
           name: 'name',
@@ -185,7 +185,7 @@ client.once(Events.ClientReady, async (c) => {
     }
   ]);
 
-  console.log('✅ Commands registered: /scoutclub');
+  console.log('✅ Commands registered: /scoutclub (global)');
 });
 
 // -------------------- INTERACTION HANDLER --------------------
@@ -249,7 +249,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        // Multiple results: let user choose via dropdown (no autocomplete)
+        // Multiple results: let user choose via dropdown
         const top = matches.slice(0, 5);
         pendingScoutChoices.set(interaction.user.id, {
           query: clubName,
