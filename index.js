@@ -105,13 +105,15 @@ You’ll see three logical chunks of JSON:
 3. **Match history JSON** – grouped into:
    - League matches (recent league performance)
    - Playoff matches (high-pressure matches)
-   - Friendly matches (often used for competitive scrims and tournaments; treat these as **highly relevant** for tactics and game plans when the sample is strong).
+   - Friendly matches (scrims / tournament-style games)
 
 When reasoning:
 - Use overall stats for **big-picture quality** and long-term strengths/weaknesses.
-- Use match history (league + playoff + friendly) for **recent form** and **patterns** (e.g., always concede late, win big, high-scoring games, etc.) *only if the data clearly supports it*.
-- If there is a **large or recent friendly sample**, treat friendly matches as a strong indicator of tournament-style behavior and give them extra weight in your tactical conclusions.
+- Use match history for **recent form** and **patterns** (e.g., always concede late, win big, high-scoring games, etc.) *only if the data clearly supports it*.
 - Use player stats to identify **key attackers**, **playmakers**, and **defensive anchors**. Only call someone a “key player” if their stats clearly stand out (more games, more goals/assists, higher ratings, etc.).
+- Treat **friendly matches as especially important for tournament-style scouting**:
+  - If the friendly sample is large or clearly more recent, lean on friendlies to infer tactical tendencies and mentality.
+  - Still cross-check with league/playoff data where available.
 
 If timestamps, seasons, or ordering fields are present:
 - You may comment on trends over time (e.g. “recently improved”, “current slump”).
@@ -120,10 +122,11 @@ If there is no clear chronological indicator:
 
 ### Style & structure
 
-- Address the report to a **coach preparing to play (or join) this team**.
-- Be **clear, concise, and practical**.
-- Do **not** mention JSON, fields, or technical details. Just talk football.
-- Avoid filler and hype. Focus on what a serious competitive team would care about.
+Address the report to a **coach preparing to play this team in serious matches or tournaments**.
+
+Be **clear, concise, and practical**.
+Do **not** mention JSON, fields, or technical details. Just talk football.
+Avoid filler and hype. Focus on what a serious competitive team would care about.
 
 Organize the report with headings like:
 
@@ -134,13 +137,13 @@ Organize the report with headings like:
    - How often they score.
    - Whether they seem direct vs possession-based (if shot counts, pass counts, or relevant stats exist).
    - Preferred threats: through the middle vs wide, headers vs long shots, etc. (only if supported).
-   - Where helpful, explicitly distinguish what you see in **league** vs **friendly** games (e.g., more open high-scoring friendlies).
+   - If friendlies show different attacking behavior from league/playoffs, mention that difference.
 
 3. **Defensive Tendencies**
    - Goals conceded, clean sheet rate.
    - Patterns: concede early/late, vulnerable to counters, weak defending crosses, etc. (only if supported).
    - Discipline if cards/fouls are present.
-   - Call out any differences you see between league and friendly/playoff matches (for example, more open or weaker defending in friendlies).
+   - If friendlies show different defensive behavior (e.g., more open or more compact), call that out.
 
 4. **Key Players & Roles**
    - 3–6 standout players, with:
@@ -149,9 +152,9 @@ Organize the report with headings like:
    - Do not list every player. Focus on the clearest standouts.
 
 5. **Recent Form & Mentality**
-   - Use the most recent slice of **league, playoff, and friendly** matches provided.
+   - Use the most recent slice of **friendlies and league/playoff matches** provided.
+   - If friendlies form looks more representative (e.g., more recent or larger sample), weigh that heavily.
    - Win/loss tendencies, blowouts vs tight games, comebacks/choking if the data supports it.
-   - Explicitly mention if friendlies suggest a different mentality (for example, more experimental lineups vs serious tournament-style friendlies).
 
 6. **Game Plan to Beat Them**
    - Make this section **as specific and concrete as possible**, but only when the data clearly supports it.
@@ -159,14 +162,14 @@ Organize the report with headings like:
      - If they concede many goals from crosses or headers, suggest overloading wide areas and attacking the back post.
      - If they score many counterattack goals with a specific striker, suggest a deeper line or dedicated cover.
      - If they struggle in close games or concede late, suggest sustained pressure late in each half.
-     - If friendlies show different behavior than league (e.g. more aggressive press, different formation), highlight this and explain how to exploit it in **tournament-style matches**.
+     - If friendlies show a very open style (high-scoring, end-to-end), recommend ways to punish that in tournament scenarios.
    - Avoid generic advice like “play your game” or “just focus”; every point should be clearly linked to a real tendency in the data.
 
 7. **Uncertainties & Data Gaps (if needed)**
    - Briefly list anything that limits confidence (missing stats, truncated history, few matches, etc.).
 
 Keep the entire report **under ~3500 characters** if possible, but do not sacrifice important insights to be shorter.
-`;
+`.trim();
 
 function buildUserPrompt({
   displayName,
@@ -202,11 +205,12 @@ Instructions:
 
 - Treat these blobs as your only source of truth.
 - Only talk about players, stats, and patterns that you can reasonably derive from these JSON structures.
-- Give **particular attention** to patterns that appear in friendly matches, because those are often used as tournament-style games. If friendlies provide a larger or more recent sample, you should lean on them heavily for inferring tactics and mentality.
+- Pay **special attention to friendlyMatches** when inferring tactical tendencies and game plans, especially for tournament-style matchups, but always cross-check with league/playoff data when available.
 - If any of the JSON is clearly partial or truncated, treat that section as partial data.
 - If something important (like positions, cards, or timestamps) is missing, acknowledge that briefly instead of guessing.
 
-Now, using ONLY this data, write the scouting report as described in the system message. Do not restate the raw JSON; just output the final report with the requested headings and football analysis.`;
+Now, using ONLY this data, write the scouting report as described in the system message. Do not restate the raw JSON; just output the final report with the requested headings and football analysis.
+`.trim();
 }
 
 /* -------------------- EA HELPERS -------------------- */
@@ -335,27 +339,30 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
       params: {
         ...clubParams,
         matchType: 'leagueMatch',
-        maxResultCount: 50
+        maxResultCount: 40
       },
       headers: EA_HEADERS,
       timeout: 10000
     }),
-    playoffMatches: axios.get('https://proclubs.ea.com/api/fc/clubs/matches', {
-      params: {
-        ...clubParams,
-        matchType: 'playoffMatch',
-        maxResultCount: 50
-      },
-      headers: EA_HEADERS,
-      timeout: 10000
-    }),
+    playoffMatches: axios.get(
+      'https://proclubs.ea.com/api/fc/clubs/matches',
+      {
+        params: {
+          ...clubParams,
+          matchType: 'playoffMatch',
+          maxResultCount: 40
+        },
+        headers: EA_HEADERS,
+        timeout: 10000
+      }
+    ),
     friendlyMatches: axios.get(
       'https://proclubs.ea.com/api/fc/clubs/matches',
       {
         params: {
           ...clubParams,
           matchType: 'friendlyMatch',
-          maxResultCount: 50
+          maxResultCount: 60 // allow a bit more friendlies – they matter for tournament prep
         },
         headers: EA_HEADERS,
         timeout: 10000
@@ -376,7 +383,10 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
 
   function safeData(settled) {
     if (settled.status === 'fulfilled') return settled.value.data;
-    console.error('⚠️ EA fetch error:', settled.reason?.toString?.() || settled.reason);
+    console.error(
+      '⚠️ EA fetch error:',
+      settled.reason?.toString?.() || settled.reason
+    );
     return null;
   }
 
@@ -425,7 +435,12 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
 
 /* -------------------- OPENAI SCOUTING HELPER -------------------- */
 
-async function createScoutingReportFromId(fcPlatform, clubId, displayName, leaderboardSeed) {
+async function createScoutingReportFromId(
+  fcPlatform,
+  clubId,
+  displayName,
+  leaderboardSeed
+) {
   if (!openaiApiKey) {
     throw new Error('OPENAI_API_KEY is not set.');
   }
@@ -436,10 +451,10 @@ async function createScoutingReportFromId(fcPlatform, clubId, displayName, leade
     leaderboardSeed
   );
 
-  // Stringify with reasonable limits to avoid context explosion
-  const infoStr = JSON.stringify(infoPayload, null, 2);
-  const statsStr = JSON.stringify(statsPayload, null, 2);
-  const matchesStr = JSON.stringify(matchesPayload, null, 2);
+  // Stringify with minimal whitespace to keep context smaller & faster
+  const infoStr = JSON.stringify(infoPayload);
+  const statsStr = JSON.stringify(statsPayload);
+  const matchesStr = JSON.stringify(matchesPayload);
 
   const inputText = buildUserPrompt({
     displayName,
@@ -537,4 +552,204 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const titleName = info?.name || chosen.name;
             const text = report || 'No report generated.';
             const trimmed =
-              text.length > 4000 ? text.slice(
+              text.length > 4000 ? text.slice(0, 4000) + '…' : text;
+
+            const embed = new EmbedBuilder()
+              .setTitle(
+                `Scouting report: ${titleName} (${labelPlatform}, ID: ${chosen.clubId})`
+              )
+              .setDescription(trimmed);
+
+            await interaction.editReply({ content: null, embeds: [embed] });
+          } catch (err) {
+            console.error('❌ Error creating scouting report from ID:', err);
+            if (
+              err.code === 'insufficient_quota' ||
+              err.error?.code === 'insufficient_quota'
+            ) {
+              await interaction.editReply(
+                'I found the club, but the OpenAI API quota has been exceeded. Please check your billing or try again later.'
+              );
+            } else if (
+              err.code === 'context_length_exceeded' ||
+              err.error?.code === 'context_length_exceeded'
+            ) {
+              await interaction.editReply(
+                'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.'
+              );
+            } else {
+              await interaction.editReply(
+                'I found the club, but failed to generate a scouting report (EA or OpenAI error).'
+              );
+            }
+          }
+
+          return;
+        }
+
+        // Multiple results: let user choose via dropdown
+        const top = matches.slice(0, 5);
+        pendingScoutChoices.set(interaction.user.id, {
+          query: clubName,
+          results: top
+        });
+
+        const options = top.map((club, index) => {
+          const labelPlatform =
+            PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
+          const bits = [];
+
+          if (club.currentDivision) bits.push(`Div ${club.currentDivision}`);
+          if (club.gamesPlayed) bits.push(`${club.gamesPlayed} games`);
+          if (club.wins != null && club.losses != null)
+            bits.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
+
+          const description = `${labelPlatform}${
+            bits.length ? ' – ' + bits.join(' / ') : ''
+          }`.slice(0, 100);
+
+          return {
+            label: `${club.name} (${labelPlatform})`,
+            description,
+            value: String(index)
+          };
+        });
+
+        const select = new StringSelectMenuBuilder()
+          .setCustomId('scoutclub_pick')
+          .setPlaceholder('Select the correct club')
+          .addOptions(options);
+
+        const row = new ActionRowBuilder().addComponents(select);
+
+        const lines = top.map((club, index) => {
+          const labelPlatform =
+            PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
+          const parts = [labelPlatform];
+          if (club.currentDivision) parts.push(`Div ${club.currentDivision}`);
+          if (club.gamesPlayed) parts.push(`${club.gamesPlayed} games`);
+          if (club.wins != null && club.losses != null)
+            parts.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
+          const extra = parts.length ? ' – ' + parts.join(' / ') : '';
+          return `**${index + 1}.** ${club.name}${extra}`;
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle('Multiple clubs found')
+          .setDescription(
+            lines.join('\n') +
+              '\n\nUse the dropdown below to pick the club you want to scout.'
+          );
+
+        await interaction.editReply({
+          content: null,
+          embeds: [embed],
+          components: [row]
+        });
+
+        return;
+      }
+    }
+
+    // Select menu: user picks which club to scout
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId === 'scoutclub_pick') {
+        const userId = interaction.user.id;
+        const state = pendingScoutChoices.get(userId);
+
+        if (!state) {
+          return interaction.reply({
+            content:
+              'No pending club selection found. Please run `/scoutclub` again.',
+            ephemeral: true
+          });
+        }
+
+        const index = parseInt(interaction.values[0], 10);
+        const chosen = state.results[index];
+        if (!chosen) {
+          return interaction.reply({
+            content: 'Invalid club selection. Please run `/scoutclub` again.',
+            ephemeral: true
+          });
+        }
+
+        // Remove pending state so we don't reuse it accidentally
+        pendingScoutChoices.delete(userId);
+
+        const labelPlatform =
+          PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
+
+        // Acknowledge quickly, then do the heavy work
+        await interaction.deferUpdate();
+
+        // Update the original message to show that we're working
+        await interaction.editReply({
+          content: `Generating scouting report for **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId})…`,
+          embeds: [],
+          components: []
+        });
+
+        try {
+          const { info, report } = await createScoutingReportFromId(
+            chosen.fcPlatform,
+            chosen.clubId,
+            chosen.name,
+            chosen.raw
+          );
+
+          const titleName = info?.name || chosen.name;
+          const text = report || 'No report generated.';
+          const trimmed =
+            text.length > 4000 ? text.slice(0, 4000) + '…' : text;
+
+          const embed = new EmbedBuilder()
+            .setTitle(
+              `Scouting report: ${titleName} (${labelPlatform}, ID: ${chosen.clubId})`
+            )
+            .setDescription(trimmed);
+
+          await interaction.editReply({ content: null, embeds: [embed] });
+        } catch (err) {
+          console.error('❌ Error creating scouting report (select):', err);
+
+          let msg =
+            'I found the club, but failed to generate a scouting report (EA or OpenAI error).';
+          if (
+            err.code === 'insufficient_quota' ||
+            err.error?.code === 'insufficient_quota'
+          ) {
+            msg =
+              'I found the club, but the OpenAI API quota has been exceeded. Please check your billing or try again later.';
+          } else if (
+            err.code === 'context_length_exceeded' ||
+            err.error?.code === 'context_length_exceeded'
+          ) {
+            msg =
+              'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.';
+          }
+
+          await interaction.editReply({
+            content: msg,
+            embeds: [],
+            components: []
+          });
+        }
+
+        return;
+      }
+    }
+  } catch (err) {
+    console.error('❌ Error handling interaction:', err);
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: 'Error.',
+        ephemeral: true
+      });
+    }
+  }
+});
+
+/* -------------------- LOGIN -------------------- */
+
+client.login(token);
