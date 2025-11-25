@@ -1,4 +1,5 @@
 // index.js – ScoutBot (FC Pro Clubs Scouting)
+require('dotenv').config();
 
 /* -------------------- IMPORTS -------------------- */
 
@@ -31,40 +32,34 @@ const openai = new OpenAI({ apiKey: openaiApiKey });
 
 /* -------------------- CONSTANTS -------------------- */
 
-// FC platforms to try when searching leaderboard
-const FC_PLATFORMS = [
-  'common-gen5',
-  'common-gen4',
-  'ps5',
-  'ps4',
-  'xbox-series-xs',
-  'xboxone'
-];
+// FC “platform” values, not xboxone/ps5/etc – these are what the FC endpoints expect
+const FC_PLATFORMS = ['common-gen5', 'common-gen4'];
 
-const PLATFORM_LABELS = {
-  'common-gen5': 'Cross-gen (Gen5)',
-  'common-gen4': 'Cross-gen (Gen4)',
-  ps5: 'PlayStation 5',
-  ps4: 'PlayStation 4',
-  'xbox-series-xs': 'Xbox Series X|S',
-  xboxone: 'Xbox One',
-  pc: 'PC'
+const FC_PLATFORM_LABELS = {
+  'common-gen5': 'Gen 5 (PS5 / Xbox Series / PC)',
+  'common-gen4': 'Gen 4 (PS4 / Xbox One)'
 };
 
-// Headers to make EA think we’re a normal browser
-const EA_HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+// Common headers copied from browser curls so Akamai doesn’t block us
+const FC_HEADERS = {
   accept: 'application/json',
-  DNT: '1',
+  'accept-language': 'en-US,en;q=0.9',
+  'content-type': 'application/json',
+  dnt: '1',
   origin: 'https://www.ea.com',
   referer: 'https://www.ea.com/',
-  'sec-ch-ua-platform': '"Windows"'
+  'sec-ch-ua':
+    '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+  'user-agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
 };
 
-// Store pending choices per user for the select menu
-// Map<userId, { query: string, results: Array<{ fcPlatform, clubId, name, division, wins, losses, ties }> }>
+// Store pending choices per user for the select menus
+// Map<userId, { query: string, results: Array<clubCandidate> }>
 const pendingScoutChoices = new Map();
+const pendingMatchesChoices = new Map();
 
 /* -------------------- DISCORD CLIENT -------------------- */
 
@@ -79,97 +74,135 @@ You are an experienced EA FC Pro Clubs opposition scout.
 
 You will receive:
 - Club info JSON for a single team
-- Aggregated club + player stats JSON
+- Aggregated club + player stats JSON (career + season)
 - Match history JSON for league, playoffs, and friendlies (trimmed and sometimes truncated)
 
 Your job: produce a concise, practical scouting report for a competitive Pro Clubs team.
 
-### Core behavior
+### Absolute priority (what you care about most)
 
-- Be **data-driven**: base all claims on the numbers and fields you actually see.
-- Make **inferences**, but never pure guesses. If something is uncertain, say it is *likely* or *appears to* based on the data.
-- **Do not invent**:
-  - Do not invent player names, positions, or stats that do not appear in the JSON.
-  - Do not invent formations or tactics that are not clearly implied by the events / stats.
-- If the JSON looks **truncated** or incomplete, treat it as partial data and say that.
-- If certain stats are **missing**, explicitly say that they are missing instead of making them up.
+1. **Roster & player statistics**  
+   - Who plays the most, who produces the most (G/A), who anchors the defense.  
+   - How production is distributed across the squad (top 1–3 vs the rest).  
+   - Roles by line: **strikers, wingers, midfielders, full-backs, centre-backs, goalkeeper**.
 
-### How to use the data
+2. **Formations & positional tendencies**  
+   - Which formations show up most in the match JSON (e.g., 4-3-3, 4-2-3-1, 3-5-2), if a formation field exists.  
+   - How those shapes map onto lines (back 4 vs back 3, single or double pivot, wide vs narrow front line).
 
-You’ll see three logical chunks of JSON:
-1. **Club info JSON** – identity, platform, region, maybe current division, etc.
-2. **Stats JSON** – may include:
-   - Overall club stats (long-term record: wins, losses, goals for/against, clean sheets, divisions, promotions/relegations)
-   - Playoff achievements
-   - Per-player stats (career stats and/or season stats: games, goals, assists, rating, positions if available)
-3. **Match history JSON** – grouped into:
-   - League matches (recent league performance)
-   - Playoff matches (high-pressure matches)
-   - Friendly matches (scrims / tournament-style games)
+3. **Match outcomes & mode splits**  
+   - Overall level (win rate, GF/GA per game, goal difference).  
+   - League vs playoff vs friendly performance and how they differ.
 
-When reasoning:
-- Use overall stats for **big-picture quality** and long-term strengths/weaknesses.
-- Use match history for **recent form** and **patterns** (e.g., always concede late, win big, high-scoring games, etc.) *only if the data clearly supports it*.
-- Use player stats to identify **key attackers**, **playmakers**, and **defensive anchors**. Only call someone a “key player” if their stats clearly stand out (more games, more goals/assists, higher ratings, etc.).
-- Treat **friendly matches as especially important for tournament-style scouting**:
-  - If the friendly sample is large or clearly more recent, lean on friendlies to infer tactical tendencies and mentality.
-  - Still cross-check with league/playoff data where available.
+### Roster-first analysis
 
-If timestamps, seasons, or ordering fields are present:
-- You may comment on trends over time (e.g. “recently improved”, “current slump”).
-If there is no clear chronological indicator:
-- Do NOT talk about “early season” vs “late season” or detailed time trends; just talk about patterns across the supplied sample.
+When fields exist, treat the **player / roster JSON as your primary lens**:
+
+- Identify **high-usage players** (most games played or minutes if available).
+- Identify **high-impact players** (most goals, assists, G+A per game, highest ratings).
+- Try to infer **roles/positions** from any relevant fields, for example:
+  - `position`, `preferredPosition`, `pos`, `role`, or similar.
+  - Any hints from formation/lineup structures in match JSON.
+- Group players by line where possible:
+  - **Striker(s)** (central goal scorers)
+  - **Wingers / wide forwards**
+  - **Attacking / central / defensive midfielders**
+  - **Full-backs / wing-backs**
+  - **Centre-backs**
+  - **Goalkeeper**
+- If true positions are not explicit, you may infer **“attacking / midfield / defensive / goalkeeper”** archetypes from stat profiles (e.g. high goals → attacker, high tackles/clearances → defender), but say when it’s an inference.
+
+Whenever feasible, give **number-heavy summaries** like:
+- Appearances, goals, assists, G+A per game.
+- Share of team goals or G+A contributed by a player or a small core.
+- “Top 2–3 attackers contribute ~X% of the team’s goals.”
+
+Focus on **who you must stop or play around**: star striker, chief creator, main CB, standout GK, etc.
+
+### Using match data
+
+Use match history to support and sharpen the roster analysis:
+
+- For each mode where enough matches exist (league / playoff / friendly), derive where possible:
+  - **Win / draw / loss counts and rates**
+  - **Goals scored per game (GF/GP)** and **goals conceded per game (GA/GP)**
+  - **Average goal difference per game**
+- If formation info exists in matches, identify the **top 2–3 formations used**, and whether they switch shape between modes.
+- Use match-level patterns only when strongly supported:
+  - Often win by big margins vs many one-goal games.
+  - Frequently concede 2+ goals vs many low-scoring games.
+  - Clear contrast between friendlies and league/playoffs (e.g., more open and high-scoring friendlies).
+
+### Derived metrics & deeper analysis
+
+Whenever the fields exist, compute **concrete metrics** instead of just repeating raw numbers:
+
+- **Overall & mode-specific metrics**
+  - Win, draw, loss rates.
+  - GF/GP, GA/GP, average goal difference.
+- **Attacking efficiency**
+  - % of goals scored by the top 1–3 scorers.
+  - G+A per game for main attackers and creators.
+- **Defensive profile**
+  - Clean-sheet rate (if clean sheets or 0 GA can be inferred).
+  - Frequency of conceding 2+ goals.
+  - Cards/fouls → aggressive vs disciplined, if those fields exist.
+- **Concentration vs balance**
+  - Is the attack heavily dependent on one player?
+  - Is chance creation spread across multiple mids/wingers?
+
+Only compute metrics that are clearly supported by the data. If the sample size is small or fields are missing, say so instead of stretching conclusions.
+
+If timestamps, seasons, or ordering fields are present you may comment on trends.  
+If not, avoid “early season / late season” talk; just summarize overall patterns from the sample.
 
 ### Style & structure
 
-Address the report to a **coach preparing to play this team in serious matches or tournaments**.
-
-Be **clear, concise, and practical**.
-Do **not** mention JSON, fields, or technical details. Just talk football.
-Avoid filler and hype. Focus on what a serious competitive team would care about.
+- Address the report to a **coach preparing to play this team**.
+- Be **clear, number-heavy, and practical**.
+- Do **not** mention JSON, fields, or technical details. Just talk football.
+- Avoid filler and hype. Focus on insights.
 
 Organize the report with headings like:
 
 1. **Overall Summary**
-   - Short paragraph with overall quality, rough level, and identity.
+   - 2–4 sentences.
+   - Include 2–3 headline metrics (e.g. overall W-D-L, GF/GP, GA/GP, goal difference).
 
-2. **Attacking Tendencies**
-   - How often they score.
-   - Whether they seem direct vs possession-based (if shot counts, pass counts, or relevant stats exist).
-   - Preferred threats: through the middle vs wide, headers vs long shots, etc. (only if supported).
-   - If friendlies show different attacking behavior from league/playoffs, mention that difference.
+2. **Squad Profile & Key Roles**
+   - Start with a **roster-level view**: core squad size, reliance on a few heavy-minute players vs rotation.
+   - Identify **top players by line** where possible:
+     - 1 GK, 2–3 CBs, 2 full-backs, 2–3 mids, 2–3 wingers, 1–2 strikers.
+   - For each key player, include a short, number-heavy line (apps, G, A, G+A/game, share of team output, etc.).
 
-3. **Defensive Tendencies**
-   - Goals conceded, clean sheet rate.
-   - Patterns: concede early/late, vulnerable to counters, weak defending crosses, etc. (only if supported).
-   - Discipline if cards/fouls are present.
-   - If friendlies show different defensive behavior (e.g., more open or more compact), call that out.
+3. **Attacking Tendencies**
+   - How often they score and concede.
+   - Where the danger comes from (central striker, wide players, late-running mids, set pieces) when stats or patterns support it.
+   - Any formation-related tendencies (e.g. back 3 with wing-backs vs classic back 4).
 
-4. **Key Players & Roles**
-   - 3–6 standout players, with:
-     - Their apparent position or role (inferred from stats or any position fields).
-     - Why they are important (goals, assists, games played, rating, etc.).
-   - Do not list every player. Focus on the clearest standouts.
+4. **Defensive Tendencies**
+   - GA/GP, clean-sheet feel, how often they concede multiple goals.
+   - Whether they look compact or exposed (e.g. concede many in high-scoring games, or mostly tight games).
+   - Discipline if card/foul data exists.
 
 5. **Recent Form & Mentality**
-   - Use the most recent slice of **friendlies and league/playoff matches** provided.
-   - If friendlies form looks more representative (e.g., more recent or larger sample), weigh that heavily.
-   - Win/loss tendencies, blowouts vs tight games, comebacks/choking if the data supports it.
+   - Use the most recent slice of matches provided.
+   - Tight vs open games, resilience/comebacks vs collapsing when behind (only when clearly supported).
+   - Note any contrast between friendlies and league/playoffs.
 
 6. **Game Plan to Beat Them**
-   - Make this section **as specific and concrete as possible**, but only when the data clearly supports it.
-   - Tie every recommendation to observed patterns, for example:
-     - If they concede many goals from crosses or headers, suggest overloading wide areas and attacking the back post.
-     - If they score many counterattack goals with a specific striker, suggest a deeper line or dedicated cover.
-     - If they struggle in close games or concede late, suggest sustained pressure late in each half.
-     - If friendlies show a very open style (high-scoring, end-to-end), recommend ways to punish that in tournament scenarios.
-   - Avoid generic advice like “play your game” or “just focus”; every point should be clearly linked to a real tendency in the data.
+   - Make this section **as specific and concrete as the data allows**, always tying recommendations to actual numbers/patterns.
+   - Examples:
+     - “Attack their full-backs: they concede many goals in wide overloads and crosses.”
+     - “Cut service to their main striker who accounts for ~X% of goals.”
+     - “Exploit spaces behind aggressive CBs who step out a lot (high GA/GP despite strong scoring).”
+   - Avoid generic advice like “just play your game”; every bullet must map to an observed tendency.
 
 7. **Uncertainties & Data Gaps (if needed)**
-   - Briefly list anything that limits confidence (missing stats, truncated history, few matches, etc.).
+   - Briefly list anything that limits confidence (missing positions, very small sample size, partial match history, etc.).
 
-Keep the entire report **under ~3500 characters** if possible, but do not sacrifice important insights to be shorter.
-`.trim();
+Keep the entire report **under ~3500 characters**, but do not hide key numeric insights just to be shorter.
+`;
 
 function buildUserPrompt({
   displayName,
@@ -204,81 +237,184 @@ ${matchesStr}
 Instructions:
 
 - Treat these blobs as your only source of truth.
-- Only talk about players, stats, and patterns that you can reasonably derive from these JSON structures.
-- Pay **special attention to friendlyMatches** when inferring tactical tendencies and game plans, especially for tournament-style matchups, but always cross-check with league/playoff data when available.
-- If any of the JSON is clearly partial or truncated, treat that section as partial data.
-- If something important (like positions, cards, or timestamps) is missing, acknowledge that briefly instead of guessing.
+- Put the **highest weight** on the **roster and player statistics**: who plays, who produces (G/A), what their roles/positions appear to be.
+- Use match history mainly to:
+  - Check consistency of those patterns over time.
+  - Derive win/draw/loss records and GF/GA per game by mode.
+  - Identify commonly used formations if any formation fields are present.
+- Before you start writing, scan these blobs and mentally compute as many **summary and per-game metrics** as you can (win rate, GF/GP, GA/GP, goal difference, contribution of top scorers, etc.) wherever the data allows.
+- Only talk about players, stats, roles, formations, and patterns that you can reasonably derive from these JSON structures.
+- If any of the JSON is clearly partial or truncated, treat that section as partial data and state that briefly.
+- If something important (like exact positions, cards, or timestamps) is missing, acknowledge that instead of guessing.
 
-Now, using ONLY this data, write the scouting report as described in the system message. Do not restate the raw JSON; just output the final report with the requested headings and football analysis.
-`.trim();
+Now, using ONLY this data, write the scouting report as described in the system message. Do not restate the raw JSON; just output the final report with the requested headings, focusing on **numbers, roster structure, and exploitable tendencies**.`;
 }
 
-/* -------------------- EA HELPERS -------------------- */
+/* -------------------- UTILS -------------------- */
 
-// Search clubs using the FC all-time leaderboard endpoint across multiple platforms
-async function searchClubsByName(query) {
-  const q = query.trim();
+function safeJsonStringify(obj, maxChars) {
+  try {
+    const s = JSON.stringify(obj);
+    if (!maxChars) return s;
+    return s.length > maxChars ? s.slice(0, maxChars) : s;
+  } catch (e) {
+    return String(obj || '').slice(0, maxChars || 8000);
+  }
+}
+
+function isNonEmpty(value) {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function countMatches(raw) {
+  if (!raw) return 0;
+  if (Array.isArray(raw)) return raw.length;
+  if (Array.isArray(raw.matches)) return raw.matches.length;
+  if (typeof raw === 'object') {
+    let total = 0;
+    for (const v of Object.values(raw)) {
+      if (Array.isArray(v)) total += v.length;
+      else if (v && Array.isArray(v.matches)) total += v.matches.length;
+    }
+    return total;
+  }
+  return 0;
+}
+
+function countPlayers(raw) {
+  if (!raw) return 0;
+  if (Array.isArray(raw)) return raw.length;
+  if (typeof raw === 'object') {
+    let total = 0;
+    for (const v of Object.values(raw)) {
+      if (Array.isArray(v)) total += v.length;
+    }
+    return total || Object.keys(raw).length;
+  }
+  return 0;
+}
+
+/* -------------------- EA SEARCH HELPERS (EA-only) -------------------- */
+
+// EA-only search, similar idea to FC26_API.search_club_by_name
+async function searchClubsAcrossPlatforms(query) {
+  const q = (query || '').trim();
   if (!q) return [];
 
   const results = [];
 
+  console.log(
+    '[DEBUG] searchClubsAcrossPlatforms: searching "%s" on platforms: %s',
+    q,
+    FC_PLATFORMS.join(', ')
+  );
+
   await Promise.all(
-    FC_PLATFORMS.map(async (platform) => {
+    FC_PLATFORMS.map(async (fcPlatform) => {
       try {
         const res = await axios.get(
           'https://proclubs.ea.com/api/fc/allTimeLeaderboard/search',
           {
             params: {
-              platform,
+              platform: fcPlatform,
               clubName: q
             },
-            headers: EA_HEADERS,
-            timeout: 8000
+            headers: FC_HEADERS,
+            timeout: 10000,
+            validateStatus: () => true
           }
         );
 
-        const data = res.data;
-        let items;
+        console.log(
+          '[DEBUG] leaderboard search platform=%s, status=%s',
+          fcPlatform,
+          res.status
+        );
 
-        if (Array.isArray(data)) {
-          items = data;
-        } else if (Array.isArray(data?.entries)) {
-          items = data.entries;
-        } else {
-          console.warn('⚠️ Unexpected leaderboard search shape:', data);
-          return;
+        if (res.status !== 200 || !res.data) return;
+
+        let data = res.data;
+
+        // Some responses come wrapped keyed at "0", unwrap that if present
+        if (data && typeof data === 'object' && data['0']) {
+          console.log(
+            '[DEBUG] leaderboard payload (platform=%s) keys: %s',
+            fcPlatform,
+            Object.keys(data)
+          );
+          data = data['0'];
+        } else if (data && typeof data === 'object') {
+          console.log(
+            '[DEBUG] leaderboard payload (platform=%s) keys: %s',
+            fcPlatform,
+            Object.keys(data)
+          );
         }
 
-        for (const item of items) {
-          if (!item) continue;
-          const clubId =
-            String(item.clubId ?? item.clubInfo?.clubId ?? '').trim();
+        let rows = [];
+        if (Array.isArray(data)) {
+          rows = data;
+        } else if (data && typeof data === 'object') {
+          rows = Object.values(data).filter(
+            (v) => v && typeof v === 'object'
+          );
+        }
+
+        console.log(
+          '[DEBUG] leaderboard parsed clubs platform=%s: %d',
+          fcPlatform,
+          rows.length
+        );
+
+        for (const row of rows) {
+          const info = row.clubInfo || row.clubinfo || row.info || row;
+          if (!info || typeof info !== 'object') continue;
+
+          const clubId = String(
+            info.clubId ?? info.clubID ?? info.id ?? info.club ?? ''
+          );
           if (!clubId) continue;
 
+          const name =
+            info.name ||
+            info.clubName ||
+            info.clubname ||
+            q;
+
+          const region =
+            info.regionName ||
+            info.region ||
+            info.countryName ||
+            null;
+
+          const division =
+            info.division ||
+            info.leagueDivision ||
+            info.bestDivision ||
+            null;
+
           results.push({
-            fcPlatform: item.platform || platform,
+            fcPlatform,
             clubId,
-            name: item.clubName || item.clubInfo?.name || q,
-            currentDivision: item.currentDivision || item.bestDivision || null,
-            wins: item.wins ?? null,
-            losses: item.losses ?? null,
-            ties: item.ties ?? null,
-            gamesPlayed: item.gamesPlayed ?? null,
-            goals: item.goals ?? null,
-            goalsAgainst: item.goalsAgainst ?? null,
-            raw: item
+            name,
+            region,
+            division,
+            raw: info // this is the leaderboard/all-time stats row
           });
         }
       } catch (err) {
         console.error(
-          `⚠️ EA leaderboard search error for platform=${platform}, query="${q}":`,
+          `⚠️ FC leaderboard search error for platform=${fcPlatform}, query="${q}":`,
           err.toString()
         );
       }
     })
   );
 
-  // Deduplicate by platform+clubId
+  // Deduplicate by fcPlatform+clubId
   const seen = new Set();
   const unique = [];
   for (const r of results) {
@@ -288,10 +424,17 @@ async function searchClubsByName(query) {
     unique.push(r);
   }
 
+  console.log(
+    '[DEBUG] searchClubsAcrossPlatforms: total unique clubs for "%s": %d',
+    q,
+    unique.length
+  );
+
   return unique;
 }
 
-// Fetch detailed club data from FC endpoints
+/* -------------------- EA FETCH HELPERS -------------------- */
+
 async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
   const platform = fcPlatform || 'common-gen5';
   const clubIdsParam = String(clubId);
@@ -303,14 +446,14 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
   const requests = {
     info: axios.get('https://proclubs.ea.com/api/fc/clubs/info', {
       params: clubParams,
-      headers: EA_HEADERS,
+      headers: FC_HEADERS,
       timeout: 8000
     }),
     overallStats: axios.get(
       'https://proclubs.ea.com/api/fc/clubs/overallStats',
       {
         params: clubParams,
-        headers: EA_HEADERS,
+        headers: FC_HEADERS,
         timeout: 8000
       }
     ),
@@ -318,7 +461,7 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
       'https://proclubs.ea.com/api/fc/club/playoffAchievements',
       {
         params: singleClubParams,
-        headers: EA_HEADERS,
+        headers: FC_HEADERS,
         timeout: 8000
       }
     ),
@@ -326,33 +469,40 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
       'https://proclubs.ea.com/api/fc/members/career/stats',
       {
         params: singleClubParams,
-        headers: EA_HEADERS,
+        headers: FC_HEADERS,
         timeout: 8000
       }
     ),
-    membersSeason: axios.get('https://proclubs.ea.com/api/fc/members/stats', {
-      params: singleClubParams,
-      headers: EA_HEADERS,
-      timeout: 8000
-    }),
-    leagueMatches: axios.get('https://proclubs.ea.com/api/fc/clubs/matches', {
-      params: {
-        ...clubParams,
-        matchType: 'leagueMatch',
-        maxResultCount: 40
-      },
-      headers: EA_HEADERS,
-      timeout: 10000
-    }),
+    membersSeason: axios.get(
+      'https://proclubs.ea.com/api/fc/members/stats',
+      {
+        params: singleClubParams,
+        headers: FC_HEADERS,
+        timeout: 8000
+      }
+    ),
+    // 🔼 Bumped to 100 to capture more matches per mode
+    leagueMatches: axios.get(
+      'https://proclubs.ea.com/api/fc/clubs/matches',
+      {
+        params: {
+          ...clubParams,
+          matchType: 'leagueMatch',
+          maxResultCount: 100
+        },
+        headers: FC_HEADERS,
+        timeout: 10000
+      }
+    ),
     playoffMatches: axios.get(
       'https://proclubs.ea.com/api/fc/clubs/matches',
       {
         params: {
           ...clubParams,
           matchType: 'playoffMatch',
-          maxResultCount: 40
+          maxResultCount: 100
         },
-        headers: EA_HEADERS,
+        headers: FC_HEADERS,
         timeout: 10000
       }
     ),
@@ -362,9 +512,9 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
         params: {
           ...clubParams,
           matchType: 'friendlyMatch',
-          maxResultCount: 60 // allow a bit more friendlies – they matter for tournament prep
+          maxResultCount: 100
         },
-        headers: EA_HEADERS,
+        headers: FC_HEADERS,
         timeout: 10000
       }
     )
@@ -407,10 +557,9 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
     clubInfo = infoRaw[clubIdsParam] || infoRaw;
   }
 
-  // Build compact payloads for OpenAI (but keep data rich)
   const infoPayload = {
     clubInfo,
-    leaderboardSeed // includes wins/losses/goals etc from search
+    leaderboardSeed // include leaderboard/all-time row alongside info
   };
 
   const statsPayload = {
@@ -433,6 +582,94 @@ async function fetchClubData(fcPlatform, clubId, leaderboardSeed = null) {
   };
 }
 
+/* -------------------- MATCH SUMMARY HELPERS (LAST 100) -------------------- */
+
+function computeRecord(matches, clubId) {
+  if (!Array.isArray(matches)) return null;
+
+  let wins = 0;
+  let draws = 0;
+  let losses = 0;
+  let goalsFor = 0;
+  let goalsAgainst = 0;
+
+  for (const m of matches) {
+    if (!m || !m.clubs || !m.clubs[clubId]) continue;
+
+    const me = m.clubs[clubId];
+    const oppId = Object.keys(m.clubs).find((id) => id !== String(clubId));
+    const opp = oppId ? m.clubs[oppId] : null;
+
+    const gf = Number(me.goals) || 0;
+    const ga = opp ? Number(opp.goals) || 0 : 0;
+
+    goalsFor += gf;
+    goalsAgainst += ga;
+
+    if (gf > ga) wins++;
+    else if (gf < ga) losses++;
+    else draws++;
+  }
+
+  const played = wins + draws + losses;
+  const goalDiff = goalsFor - goalsAgainst;
+
+  return { played, wins, draws, losses, goalsFor, goalsAgainst, goalDiff };
+}
+
+async function summarizeMatchesForClub(
+  fcPlatform,
+  clubId,
+  displayName,
+  leaderboardSeed
+) {
+  const { matchesPayload } = await fetchClubData(
+    fcPlatform,
+    clubId,
+    leaderboardSeed
+  );
+
+  const empty = {
+    played: 0,
+    wins: 0,
+    draws: 0,
+    losses: 0,
+    goalsFor: 0,
+    goalsAgainst: 0,
+    goalDiff: 0
+  };
+
+  const league = computeRecord(matchesPayload.leagueMatches, clubId) || empty;
+  const playoffs = computeRecord(matchesPayload.playoffMatches, clubId) || empty;
+  const friendlies =
+    computeRecord(matchesPayload.friendlyMatches, clubId) || empty;
+
+  function formatLine(label, rec) {
+    if (!rec.played) return `${label}: no matches in last sample.`;
+    const {
+      played,
+      wins,
+      draws,
+      losses,
+      goalsFor,
+      goalsAgainst,
+      goalDiff
+    } = rec;
+    return `${label}: ${wins}-${draws}-${losses} in ${played} matches, GF ${goalsFor} / GA ${goalsAgainst} (GD ${
+      goalDiff >= 0 ? '+' : ''
+    }${goalDiff})`;
+  }
+
+  const lines = [
+    `Last matches for **${displayName}** (by mode, up to EA cap):`,
+    formatLine('League', league),
+    formatLine('Playoffs', playoffs),
+    formatLine('Friendlies', friendlies)
+  ];
+
+  return lines.join('\n');
+}
+
 /* -------------------- OPENAI SCOUTING HELPER -------------------- */
 
 async function createScoutingReportFromId(
@@ -445,16 +682,42 @@ async function createScoutingReportFromId(
     throw new Error('OPENAI_API_KEY is not set.');
   }
 
-  const { infoPayload, statsPayload, matchesPayload } = await fetchClubData(
-    fcPlatform,
-    clubId,
-    leaderboardSeed
-  );
+  const { infoPayload, statsPayload, matchesPayload } =
+    await fetchClubData(fcPlatform, clubId, leaderboardSeed);
 
-  // Stringify with minimal whitespace to keep context smaller & faster
-  const infoStr = JSON.stringify(infoPayload);
-  const statsStr = JSON.stringify(statsPayload);
-  const matchesStr = JSON.stringify(matchesPayload);
+  const hasInfo = isNonEmpty(infoPayload?.clubInfo);
+  const hasStats = Object.values(statsPayload).some(isNonEmpty);
+  const hasMatches = Object.values(matchesPayload).some(isNonEmpty);
+
+  const leagueCount = countMatches(matchesPayload.leagueMatches);
+  const playoffCount = countMatches(matchesPayload.playoffMatches);
+  const friendlyCount = countMatches(matchesPayload.friendlyMatches);
+  const careerPlayers = countPlayers(statsPayload.membersCareer);
+  const seasonPlayers = countPlayers(statsPayload.membersSeason);
+
+  console.log('[DEBUG] Data summary for club', clubId, '(', fcPlatform, '):', {
+    hasInfo,
+    hasStats,
+    hasMatches,
+    leagueCount,
+    playoffCount,
+    friendlyCount,
+    careerPlayers,
+    seasonPlayers
+  });
+
+  if (!hasStats && !hasMatches) {
+    const err = new Error(
+      'No stats or match history available from EA for this club.'
+    );
+    err.code = 'insufficient_data';
+    throw err;
+  }
+
+  // 🔼 Widened limits so more raw JSON reaches the model
+  const infoStr = safeJsonStringify(infoPayload, 16000);
+  const statsStr = safeJsonStringify(statsPayload, 64000);
+  const matchesStr = safeJsonStringify(matchesPayload, 64000);
 
   const inputText = buildUserPrompt({
     displayName,
@@ -489,7 +752,6 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`✅ Logged in as ${c.user.tag}`);
   console.log(`✅ App ID: ${c.application.id}`);
 
-  // Global command registration so it works on every server the bot is in
   await c.application.commands.set([
     {
       name: 'scoutclub',
@@ -503,10 +765,23 @@ client.once(Events.ClientReady, async (c) => {
           required: true
         }
       ]
+    },
+    {
+      name: 'clubmatches',
+      description:
+        'Show a summary of the last (up to) 100 league/playoff/friendly matches for a club.',
+      options: [
+        {
+          name: 'name',
+          description: 'Approximate club name as it appears in-game',
+          type: ApplicationCommandOptionType.String,
+          required: true
+        }
+      ]
     }
   ]);
 
-  console.log('✅ Commands registered: /scoutclub (global)');
+  console.log('✅ Commands registered: /scoutclub, /clubmatches (global)');
 });
 
 /* -------------------- INTERACTION HANDLER -------------------- */
@@ -522,7 +797,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await interaction.deferReply();
 
-        const matches = await searchClubsByName(clubName);
+        const matches = await searchClubsAcrossPlatforms(clubName);
 
         if (!matches.length) {
           await interaction.editReply(
@@ -535,7 +810,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (matches.length === 1) {
           const chosen = matches[0];
           const labelPlatform =
-            PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
+            FC_PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
 
           await interaction.editReply(
             `Found one match: **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId}). Generating scouting report…`
@@ -577,6 +852,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
               await interaction.editReply(
                 'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.'
               );
+            } else if (
+              err.code === 'insufficient_data' ||
+              err.error?.code === 'insufficient_data'
+            ) {
+              await interaction.editReply(
+                'I found the club, but EA did not return enough stats or match history to generate a meaningful, data-driven scouting report.'
+              );
             } else {
               await interaction.editReply(
                 'I found the club, but failed to generate a scouting report (EA or OpenAI error).'
@@ -596,17 +878,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const options = top.map((club, index) => {
           const labelPlatform =
-            PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
-          const bits = [];
+            FC_PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
 
-          if (club.currentDivision) bits.push(`Div ${club.currentDivision}`);
-          if (club.gamesPlayed) bits.push(`${club.gamesPlayed} games`);
-          if (club.wins != null && club.losses != null)
-            bits.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
-
-          const description = `${labelPlatform}${
-            bits.length ? ' – ' + bits.join(' / ') : ''
-          }`.slice(0, 100);
+          const description = `${labelPlatform}`.slice(0, 100);
 
           return {
             label: `${club.name} (${labelPlatform})`,
@@ -624,12 +898,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const lines = top.map((club, index) => {
           const labelPlatform =
-            PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
+            FC_PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
           const parts = [labelPlatform];
-          if (club.currentDivision) parts.push(`Div ${club.currentDivision}`);
-          if (club.gamesPlayed) parts.push(`${club.gamesPlayed} games`);
-          if (club.wins != null && club.losses != null)
-            parts.push(`${club.wins}-${club.losses}-${club.ties ?? 0} W-L-D`);
           const extra = parts.length ? ' – ' + parts.join(' / ') : '';
           return `**${index + 1}.** ${club.name}${extra}`;
         });
@@ -649,10 +919,105 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         return;
       }
+
+      if (cmd === 'clubmatches') {
+        const clubName = interaction.options.getString('name', true);
+
+        await interaction.deferReply();
+
+        const matches = await searchClubsAcrossPlatforms(clubName);
+
+        if (!matches.length) {
+          await interaction.editReply(
+            'I could not find any clubs matching that name on EA FC servers. Try a different spelling or the exact in-game name.'
+          );
+          return;
+        }
+
+        // If only one result, go straight to the summary
+        if (matches.length === 1) {
+          const chosen = matches[0];
+          const labelPlatform =
+            FC_PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
+
+          await interaction.editReply(
+            `Found one match: **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId}). Fetching last matches…`
+          );
+
+          try {
+            const summaryText = await summarizeMatchesForClub(
+              chosen.fcPlatform,
+              chosen.clubId,
+              chosen.name,
+              chosen.raw
+            );
+
+            await interaction.editReply(summaryText);
+          } catch (err) {
+            console.error('❌ Error summarizing matches:', err);
+            await interaction.editReply(
+              'I found the club, but failed to fetch match history from EA.'
+            );
+          }
+
+          return;
+        }
+
+        // Multiple results: let user choose via dropdown
+        const top = matches.slice(0, 5);
+        pendingMatchesChoices.set(interaction.user.id, {
+          query: clubName,
+          results: top
+        });
+
+        const options = top.map((club, index) => {
+          const labelPlatform =
+            FC_PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
+
+          const description = `${labelPlatform}`.slice(0, 100);
+
+          return {
+            label: `${club.name} (${labelPlatform})`,
+            description,
+            value: String(index)
+          };
+        });
+
+        const select = new StringSelectMenuBuilder()
+          .setCustomId('clubmatches_pick')
+          .setPlaceholder('Select the correct club')
+          .addOptions(options);
+
+        const row = new ActionRowBuilder().addComponents(select);
+
+        const lines = top.map((club, index) => {
+          const labelPlatform =
+            FC_PLATFORM_LABELS[club.fcPlatform] || club.fcPlatform;
+          const parts = [labelPlatform];
+          const extra = parts.length ? ' – ' + parts.join(' / ') : '';
+          return `**${index + 1}.** ${club.name}${extra}`;
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle('Multiple clubs found')
+          .setDescription(
+            lines.join('\n') +
+              '\n\nUse the dropdown below to pick the club whose recent matches you want to see.'
+          );
+
+        await interaction.editReply({
+          content: null,
+          embeds: [embed],
+          components: [row]
+        });
+
+        return;
+      }
     }
 
-    // Select menu: user picks which club to scout
+    // Select menus
     if (interaction.isStringSelectMenu()) {
+      // User picks which club to scout
       if (interaction.customId === 'scoutclub_pick') {
         const userId = interaction.user.id;
         const state = pendingScoutChoices.get(userId);
@@ -678,12 +1043,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         pendingScoutChoices.delete(userId);
 
         const labelPlatform =
-          PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
+          FC_PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
 
-        // Acknowledge quickly, then do the heavy work
         await interaction.deferUpdate();
 
-        // Update the original message to show that we're working
         await interaction.editReply({
           content: `Generating scouting report for **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId})…`,
           embeds: [],
@@ -727,6 +1090,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           ) {
             msg =
               'I found the club, but the data was too large for the model to process in one go. Try again later or with a different club name.';
+          } else if (
+            err.code === 'insufficient_data' ||
+            err.error?.code === 'insufficient_data'
+          ) {
+            msg =
+              'I found the club, but EA did not return enough stats or match history to generate a meaningful, data-driven scouting report.';
           }
 
           await interaction.editReply({
@@ -738,14 +1107,81 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         return;
       }
+
+      // User picks which club's recent matches to show
+      if (interaction.customId === 'clubmatches_pick') {
+        const userId = interaction.user.id;
+        const state = pendingMatchesChoices.get(userId);
+
+        if (!state) {
+          return interaction.reply({
+            content:
+              'No pending club selection found. Please run `/clubmatches` again.',
+            ephemeral: true
+          });
+        }
+
+        const index = parseInt(interaction.values[0], 10);
+        const chosen = state.results[index];
+        if (!chosen) {
+          return interaction.reply({
+            content: 'Invalid club selection. Please run `/clubmatches` again.',
+            ephemeral: true
+          });
+        }
+
+        // Remove pending state so we don't reuse it accidentally
+        pendingMatchesChoices.delete(userId);
+
+        const labelPlatform =
+          FC_PLATFORM_LABELS[chosen.fcPlatform] || chosen.fcPlatform;
+
+        await interaction.deferUpdate();
+
+        await interaction.editReply({
+          content: `Fetching recent matches for **${chosen.name}** on **${labelPlatform}** (club ID: ${chosen.clubId})…`,
+          embeds: [],
+          components: []
+        });
+
+        try {
+          const summaryText = await summarizeMatchesForClub(
+            chosen.fcPlatform,
+            chosen.clubId,
+            chosen.name,
+            chosen.raw
+          );
+
+          await interaction.editReply({
+            content: summaryText,
+            embeds: [],
+            components: []
+          });
+        } catch (err) {
+          console.error('❌ Error summarizing matches (select):', err);
+
+          await interaction.editReply({
+            content:
+              'I found the club, but failed to fetch match history from EA.',
+            embeds: [],
+            components: []
+          });
+        }
+
+        return;
+      }
     }
   } catch (err) {
     console.error('❌ Error handling interaction:', err);
     if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: 'Error.',
-        ephemeral: true
-      });
+      try {
+        await interaction.reply({
+          content: 'Error.',
+          ephemeral: true
+        });
+      } catch (e) {
+        console.error('❌ Failed to send error reply:', e);
+      }
     }
   }
 });
